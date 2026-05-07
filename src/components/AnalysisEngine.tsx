@@ -25,6 +25,7 @@ import type {
   ArmSignal, LandmarkTrackingMemory, CatchAxis, StyleResult,
   PoseConstructorConfig, SwimmerProfile, PoseInstance
 } from "@/types/glide";
+import { resolvePoseCtor } from "@/lib/mediapipe";
 import {
   DEFAULT_STYLE_CHECK_INTERVAL_MS, MIN_STYLE_CHECK_INTERVAL_MS,
   MAX_STYLE_CHECK_INTERVAL_MS, UI_UPDATE_INTERVAL_MS,
@@ -47,42 +48,49 @@ import {
   createTrackingStatus, createMotionTrails, isUsablePoseFrame
 } from "@/lib/vision";
 
-export { cameraErrorMessage, cameraUnsupportedMessage, hasBrowserCameraApi };
+interface TrackingContext {
+  strokeRange: StrokeRange;
+  landmarkMemory: LandmarkTrackingMemory;
+  motionHistory: MotionHistory;
+  strokeBelief: StrokeBeliefState;
+  angleMemory: AngleMemory;
+  strokeMemory: StrokeMemory;
+  styleAccumulator: StyleAccumulator;
+  styleWindowStartedAt: number;
+  lastStyleCheck: number;
+  lastStyleTechnique: TechniqueAnalysis | null;
+  armIdentityMemory: ArmIdentityMemory;
+  activeArmMemory: ActiveArmMemory;
+  lastAnalysis: FullAnalysis | null;
+  lastStateUpdate: number;
+  missingFrames: number;
+}
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function resolvePoseCtor(mp: any): new (config: PoseConstructorConfig) => PoseInstance {
-  const windowPose =
-    typeof window !== "undefined"
-      ? (window as Window & { Pose?: unknown }).Pose
-      : undefined;
-  const Ctor = mp.Pose || mp.default?.Pose || windowPose || mp;
-
-  if (typeof window !== "undefined" && typeof Ctor === "function") {
-    (window as Window & { Pose?: unknown }).Pose = Ctor;
-  }
-
-  return Ctor as new (config: PoseConstructorConfig) => PoseInstance;
+function createTrackingContext(): TrackingContext {
+  return {
+    strokeRange: { minX: 1, maxX: 0, minY: 1, maxY: 0 },
+    landmarkMemory: createLandmarkTrackingMemory(),
+    motionHistory: createMotionHistory(),
+    strokeBelief: createStrokeBelief(),
+    angleMemory: createAngleMemory(),
+    strokeMemory: createStrokeMemory(),
+    styleAccumulator: createStyleAccumulator(),
+    styleWindowStartedAt: 0,
+    lastStyleCheck: 0,
+    lastStyleTechnique: null,
+    armIdentityMemory: createArmIdentityMemory(),
+    activeArmMemory: createActiveArmMemory(),
+    lastAnalysis: null,
+    lastStateUpdate: 0,
+    missingFrames: 0,
+  };
 }
 
 export default function AnalysisEngine() {
   const webcamRef = useRef<Webcam>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const strokeRangeRef = useRef<StrokeRange>({ minX: 1, maxX: 0, minY: 1, maxY: 0 });
-  const landmarkMemoryRef = useRef<LandmarkTrackingMemory>(createLandmarkTrackingMemory());
-  const motionHistoryRef = useRef<MotionHistory>(createMotionHistory());
-  const strokeBeliefRef = useRef<StrokeBeliefState>(createStrokeBelief());
-  const angleMemoryRef = useRef<AngleMemory>(createAngleMemory());
-  const strokeMemoryRef = useRef<StrokeMemory>(createStrokeMemory());
-  const styleAccumulatorRef = useRef<StyleAccumulator>(createStyleAccumulator());
-  const styleWindowStartedAtRef = useRef(0);
-  const lastStyleCheckRef = useRef(0);
-  const lastStyleTechniqueRef = useRef<TechniqueAnalysis | null>(null);
+  const trackingContextRef = useRef<TrackingContext>(createTrackingContext());
   const styleCheckIntervalRef = useRef(DEFAULT_STYLE_CHECK_INTERVAL_MS);
-  const armIdentityMemoryRef = useRef<ArmIdentityMemory>(createArmIdentityMemory());
-  const activeArmMemoryRef = useRef<ActiveArmMemory>(createActiveArmMemory());
-  const lastAnalysisRef = useRef<FullAnalysis | null>(null);
-  const lastStateUpdateRef = useRef(0);
-  const missingFramesRef = useRef(0);
   const trackerSettingsRef = useRef<TrackerSettings>(DEFAULT_TRACKER_SETTINGS);
   const analysisPausedRef = useRef(false);
   const strokeFocusRef = useRef<StrokeFocus>("Auto");
@@ -118,21 +126,7 @@ export default function AnalysisEngine() {
   const [cameraApiSupported, setCameraApiSupported] = useState(true);
 
   const resetTrackingMemory = useCallback(() => {
-    landmarkMemoryRef.current = createLandmarkTrackingMemory();
-    motionHistoryRef.current = createMotionHistory();
-    resetStrokeBelief(strokeBeliefRef.current);
-    angleMemoryRef.current = createAngleMemory();
-    strokeMemoryRef.current = createStrokeMemory();
-    styleAccumulatorRef.current = createStyleAccumulator();
-    styleWindowStartedAtRef.current = 0;
-    lastStyleCheckRef.current = 0;
-    lastStyleTechniqueRef.current = null;
-    armIdentityMemoryRef.current = createArmIdentityMemory();
-    activeArmMemoryRef.current = createActiveArmMemory();
-    strokeRangeRef.current = { minX: 1, maxX: 0, minY: 1, maxY: 0 };
-    lastAnalysisRef.current = null;
-    lastStateUpdateRef.current = 0;
-    missingFramesRef.current = 0;
+    trackingContextRef.current = createTrackingContext();
     setAnalysisState(null);
   }, []);
 
@@ -149,7 +143,7 @@ export default function AnalysisEngine() {
       setTrackerSettings(nextSettings);
 
       if (patch.predictionMode === "off") {
-        missingFramesRef.current = 0;
+        trackingContextRef.current.missingFrames = 0;
       }
 
       if (viewModeChanged || cameraFacingChanged) {
@@ -172,8 +166,8 @@ export default function AnalysisEngine() {
       MAX_STYLE_CHECK_INTERVAL_MS
     );
     styleCheckIntervalRef.current = normalizedInterval;
-    styleAccumulatorRef.current = createStyleAccumulator();
-    styleWindowStartedAtRef.current =
+    trackingContextRef.current.styleAccumulator = createStyleAccumulator();
+    trackingContextRef.current.styleWindowStartedAt =
       typeof performance !== "undefined" ? performance.now() : 0;
     setStyleCheckIntervalMs(normalizedInterval);
   }, []);
@@ -246,6 +240,7 @@ export default function AnalysisEngine() {
         : liveFps;
     }
 
+    const ctxState = trackingContextRef.current;
     const maxPredictionFrames = predictionHoldFrames(settings.predictionMode);
     const rawLandmarks = results.poseLandmarks ?? null;
     const roughLandmarks = rawLandmarks
@@ -257,10 +252,10 @@ export default function AnalysisEngine() {
       : null;
 
     if (!roughLandmarks || !isUsablePoseFrame(roughLandmarks, settings, swimmerProfile)) {
-      missingFramesRef.current += 1;
+      ctxState.missingFrames += 1;
       const predictedLandmarks =
         maxPredictionFrames > 0
-          ? predictLandmarksFromMemory(landmarkMemoryRef.current)
+          ? predictLandmarksFromMemory(ctxState.landmarkMemory)
           : null;
       const predicted = predictedLandmarks
         ? enhanceSwimLandmarks(predictedLandmarks)
@@ -268,25 +263,25 @@ export default function AnalysisEngine() {
 
       if (
         predicted &&
-        lastAnalysisRef.current &&
-        missingFramesRef.current <= maxPredictionFrames
+        ctxState.lastAnalysis &&
+        ctxState.missingFrames <= maxPredictionFrames
       ) {
         const predictedAnalysis: FullAnalysis = {
-          ...lastAnalysisRef.current,
+          ...ctxState.lastAnalysis,
           tracking: createTrackingStatus(
             predicted,
             settings,
             "predicting",
-            missingFramesRef.current,
+            ctxState.missingFrames,
             fpsRef.current,
             swimmerProfile
           ),
         };
 
-        lastAnalysisRef.current = predictedAnalysis;
-        if (now - lastStateUpdateRef.current > UI_UPDATE_INTERVAL_MS) {
+        ctxState.lastAnalysis = predictedAnalysis;
+        if (now - ctxState.lastStateUpdate > UI_UPDATE_INTERVAL_MS) {
           setAnalysisState(predictedAnalysis);
-          lastStateUpdateRef.current = now;
+          ctxState.lastStateUpdate = now;
         }
 
         drawSkeleton(
@@ -300,23 +295,23 @@ export default function AnalysisEngine() {
       }
 
       ctx.clearRect(0, 0, overlayMetrics.width, overlayMetrics.height);
-      if (missingFramesRef.current > maxPredictionFrames) {
+      if (ctxState.missingFrames > maxPredictionFrames) {
         resetTrackingMemory();
       }
       return;
     }
 
     if (!rawLandmarks) return;
-    missingFramesRef.current = 0;
+    ctxState.missingFrames = 0;
 
     const smoothed = enhanceSwimLandmarks(
-      stabilizeLandmarks(rawLandmarks, landmarkMemoryRef.current, settings)
+      stabilizeLandmarks(rawLandmarks, ctxState.landmarkMemory, settings)
     );
     const cleaned = cleanUnstableArmGeometry(smoothed, settings, swimmerProfile);
-    syncEnhancedArmEndpointMemory(landmarkMemoryRef.current, cleaned);
+    syncEnhancedArmEndpointMemory(ctxState.landmarkMemory, cleaned);
     const armIdentity = resolveArmIdentityLandmarks(
       cleaned,
-      armIdentityMemoryRef.current,
+      ctxState.armIdentityMemory,
       swimmerProfile
     );
     const identified = cleanUnstableArmGeometry(
@@ -326,24 +321,24 @@ export default function AnalysisEngine() {
     );
 
     if (armIdentity.swappedChanged) {
-      motionHistoryRef.current = createMotionHistory();
-      resetStrokeBelief(strokeBeliefRef.current);
-      angleMemoryRef.current = createAngleMemory();
-      styleAccumulatorRef.current = createStyleAccumulator();
-      styleWindowStartedAtRef.current = now;
+      ctxState.motionHistory = createMotionHistory();
+      resetStrokeBelief(ctxState.strokeBelief);
+      ctxState.angleMemory = createAngleMemory();
+      ctxState.styleAccumulator = createStyleAccumulator();
+      ctxState.styleWindowStartedAt = now;
     }
 
     const singleArmMode = shouldUseSingleArmMode(identified, swimmerProfile);
     if (!singleArmMode) {
-      activeArmMemoryRef.current = createActiveArmMemory();
+      ctxState.activeArmMemory = createActiveArmMemory();
     }
 
     const activeArm = singleArmMode
-      ? resolveActiveArm(identified, activeArmMemoryRef.current, swimmerProfile)
+      ? resolveActiveArm(identified, ctxState.activeArmMemory, swimmerProfile)
       : null;
     const lm = activeArm ? suppressArm(identified, oppositeArm(activeArm)) : identified;
 
-    const motion = updateMotionHistory(motionHistoryRef.current, lm);
+    const motion = updateMotionHistory(ctxState.motionHistory, lm);
     const shoulders = resolveCameraViewMetrics(
       getShoulderMetrics(lm, swimmerProfile),
       settings.viewMode
@@ -353,32 +348,32 @@ export default function AnalysisEngine() {
 
     const evf = stabilizeEVFResult(
       checkEVF(lm, sr, shoulders, motion, swimmerProfile),
-      angleMemoryRef.current,
+      ctxState.angleMemory,
       shoulders.view
     );
     const styleIntervalMs = styleCheckIntervalRef.current;
 
-    if (styleWindowStartedAtRef.current === 0) {
-      styleWindowStartedAtRef.current = now;
+    if (ctxState.styleWindowStartedAt === 0) {
+      ctxState.styleWindowStartedAt = now;
     }
 
     const rawStyle = classifyStroke(
       lm,
       shoulders,
       motion,
-      motionHistoryRef.current,
-      strokeBeliefRef.current,
+      ctxState.motionHistory,
+      ctxState.strokeBelief,
       swimmerProfile
     );
-    pushStyleSample(styleAccumulatorRef.current, rawStyle);
+    pushStyleSample(ctxState.styleAccumulator, rawStyle);
 
     const shouldCheckStyle =
-      now - styleWindowStartedAtRef.current >= styleIntervalMs;
+      now - ctxState.styleWindowStartedAt >= styleIntervalMs;
     let technique: TechniqueAnalysis;
 
     if (shouldCheckStyle) {
       const intervalStyle = summarizeStyleSamples(
-        styleAccumulatorRef.current,
+        ctxState.styleAccumulator,
         rawStyle
       );
       const rawTechnique = createTechniqueAnalysisFromStyle(
@@ -388,14 +383,14 @@ export default function AnalysisEngine() {
         intervalStyle,
         swimmerProfile
       );
-      technique = withStrokeMemory(rawTechnique, strokeMemoryRef.current);
-      lastStyleTechniqueRef.current = technique;
-      lastStyleCheckRef.current = now;
-      styleAccumulatorRef.current = createStyleAccumulator();
-      styleWindowStartedAtRef.current = now;
-    } else if (lastStyleTechniqueRef.current) {
+      technique = withStrokeMemory(rawTechnique, ctxState.strokeMemory);
+      ctxState.lastStyleTechnique = technique;
+      ctxState.lastStyleCheck = now;
+      ctxState.styleAccumulator = createStyleAccumulator();
+      ctxState.styleWindowStartedAt = now;
+    } else if (ctxState.lastStyleTechnique) {
       technique = refreshTechniqueFrame(
-        lastStyleTechniqueRef.current,
+        ctxState.lastStyleTechnique,
         lm,
         evf,
         shoulders,
@@ -416,9 +411,9 @@ export default function AnalysisEngine() {
     const styleCheck = createStyleCheckStatus(
       now,
       styleIntervalMs,
-      styleWindowStartedAtRef.current,
-      lastStyleCheckRef.current,
-      styleAccumulatorRef.current.samples
+      ctxState.styleWindowStartedAt,
+      ctxState.lastStyleCheck,
+      ctxState.styleAccumulator.samples
     );
     const analysis: FullAnalysis = {
       evf,
@@ -433,13 +428,13 @@ export default function AnalysisEngine() {
         fpsRef.current,
         swimmerProfile
       ),
-      trails: createMotionTrails(motionHistoryRef.current),
+      trails: createMotionTrails(ctxState.motionHistory),
     };
-    lastAnalysisRef.current = analysis;
+    ctxState.lastAnalysis = analysis;
 
-    if (now - lastStateUpdateRef.current > UI_UPDATE_INTERVAL_MS) {
+    if (now - ctxState.lastStateUpdate > UI_UPDATE_INTERVAL_MS) {
       setAnalysisState(analysis);
-      lastStateUpdateRef.current = now;
+      ctxState.lastStateUpdate = now;
     }
 
     drawSkeleton(ctx, lm, analysis, overlayMetrics, settings);
@@ -453,7 +448,7 @@ export default function AnalysisEngine() {
 
     let cancelled = false;
     let pose: PoseInstance | null = null;
-    const strokeBelief = strokeBeliefRef.current;
+    const strokeBelief = trackingContextRef.current.strokeBelief;
 
     setCameraReady(false);
     setIsLoaded(false);
@@ -519,21 +514,8 @@ export default function AnalysisEngine() {
       cancelled = true;
       setCameraReady(false);
       setIsLoaded(false);
-      landmarkMemoryRef.current = createLandmarkTrackingMemory();
-      motionHistoryRef.current = createMotionHistory();
-      resetStrokeBelief(strokeBelief);
-      angleMemoryRef.current = createAngleMemory();
-      strokeMemoryRef.current = createStrokeMemory();
-      styleAccumulatorRef.current = createStyleAccumulator();
-      styleWindowStartedAtRef.current = 0;
-      lastStyleCheckRef.current = 0;
-      lastStyleTechniqueRef.current = null;
-      armIdentityMemoryRef.current = createArmIdentityMemory();
-      activeArmMemoryRef.current = createActiveArmMemory();
-      strokeRangeRef.current = { minX: 1, maxX: 0, minY: 1, maxY: 0 };
-      lastAnalysisRef.current = null;
-      lastStateUpdateRef.current = 0;
-      missingFramesRef.current = 0;
+      trackingContextRef.current = createTrackingContext();
+      trackingContextRef.current.strokeBelief = strokeBelief;
       try {
         pose?.close();
       } catch {
