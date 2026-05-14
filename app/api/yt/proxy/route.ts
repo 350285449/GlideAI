@@ -10,16 +10,26 @@ export async function GET(request: Request) {
   }
 
   try {
-    const output: any = await ytdl(url, {
-      dumpJson: true,
-      noCheckCertificates: true,
-      noWarnings: true,
-      preferFreeFormats: true,
-      addHeader: [
-        'referer:youtube.com',
-        'user-agent:Mozilla/5.0'
-      ]
-    });
+    let output: any;
+    try {
+      output = await ytdl(url, {
+        dumpJson: true,
+        noCheckCertificates: true,
+        noWarnings: true,
+        preferFreeFormats: true,
+        extractorArgs: 'youtube:player_client=web_safari,web_embedded,default,-tv,-android_sdkless',
+        addHeader: [
+          'referer:youtube.com',
+          'user-agent:Mozilla/5.0'
+        ]
+      } as any);
+    } catch (e: any) {
+      if (e.stdout && e.stdout.startsWith('{')) {
+        output = JSON.parse(e.stdout);
+      } else {
+        throw e;
+      }
+    }
 
     const format = output.formats.find((f: any) => f.format_id === '18') || 
                    output.formats.find((f: any) => f.ext === 'mp4' && f.vcodec !== 'none' && f.acodec !== 'none');

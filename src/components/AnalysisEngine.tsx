@@ -5873,7 +5873,7 @@ export default function AnalysisEngine({
               }
             }}
             onEnded={() => {
-              if (!isAnalysisPaused) {
+              if (!analysisPaused) {
                 toggleAnalysis();
               }
             }}
