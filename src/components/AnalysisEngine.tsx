@@ -409,14 +409,14 @@ const CATCH_PHASE_THRESHOLD = 0.3;
 const CATCH_PHASE_EDGE_THRESHOLD = 0.28;
 const STROKE_RANGE_DECAY = 0.0025;
 const LANDMARK_SMOOTHING_ALPHA = 0.34;
-const LANDMARK_RELIABLE_VISIBILITY = 0.35;
-const LANDMARK_PARTIAL_VISIBILITY = 0.14;
-const LANDMARK_DRAW_VISIBILITY = 0.16;
-const HAND_PROXY_VISIBILITY = 0.24;
+const LANDMARK_RELIABLE_VISIBILITY = 0.22;
+const LANDMARK_PARTIAL_VISIBILITY = 0.08;
+const LANDMARK_DRAW_VISIBILITY = 0.1;
+const HAND_PROXY_VISIBILITY = 0.16;
 const LOW_CONFIDENCE_JUMP_LIMIT = 0.11;
 const RELIABLE_JUMP_LIMIT = 0.24;
-const ASSIST_PREDICTION_HOLD_FRAMES = 8;
-const EXTENDED_PREDICTION_HOLD_FRAMES = 22;
+const ASSIST_PREDICTION_HOLD_FRAMES = 12;
+const EXTENDED_PREDICTION_HOLD_FRAMES = 36;
 const MOTION_HISTORY_LENGTH = 42;
 const DEFAULT_STYLE_CHECK_INTERVAL_MS = 5000;
 const MIN_STYLE_CHECK_INTERVAL_MS = 3000;
@@ -438,13 +438,13 @@ const ARM_IDENTITY_ACQUIRE_FRAMES = 8;
 const ARM_IDENTITY_HOLD_FRAMES = 45;
 const ARM_IDENTITY_ANCHOR_ALPHA = 0.08;
 const UI_UPDATE_INTERVAL_MS = 250;
-const MIN_ARM_SIGNAL_SCORE = 0.62;
+const MIN_ARM_SIGNAL_SCORE = 0.46;
 const SIDE_VIEW_SHOULDER_WIDTH_THRESHOLD = 0.06;
 const SINGLE_SHOULDER_SIDE_SCORE_MARGIN = 0.5;
 const ACTIVE_ARM_SWITCH_SCORE_MARGIN = 1.25;
-const ARM_SEGMENT_MIN = 0.005;
-const LONG_RANGE_BODY_MIN = 0.02;
-const ARM_LENGTH_QUALITY_REFERENCE = 0.032;
+const ARM_SEGMENT_MIN = 0.0032;
+const LONG_RANGE_BODY_MIN = 0.012;
+const ARM_LENGTH_QUALITY_REFERENCE = 0.022;
 const FOREARM_SEGMENT_MAX = 0.58;
 const UPPER_ARM_SEGMENT_MAX = 0.52;
 const ARM_RATIO_MIN = 0.25;
@@ -467,19 +467,21 @@ const FULL_POSE_INPUT_TRANSFORM: PoseInputTransform = Object.freeze({
   width: 1,
   height: 1,
 });
-const LONG_RANGE_INPUT_MAX_WIDTH = 1280;
-const LONG_RANGE_INPUT_MAX_HEIGHT = 720;
-const LONG_RANGE_FULL_SCAN_EVERY = 5;
-const LONG_RANGE_SCAN_CROP_SIZE = 0.46;
-const LONG_RANGE_CENTER_SCAN_CROP_SIZE = 0.64;
-const LONG_RANGE_MIN_LOCK_CROP = 0.16;
-const LONG_RANGE_MAX_LOCK_CROP = 0.74;
-const LONG_RANGE_LOCK_PADDING = 3.1;
-const LONG_RANGE_TRACK_BLEND = 0.32;
-const LONG_RANGE_REACQUIRE_HOLD_FRAMES = 36;
-const MIN_CATCH_RANGE = 0.004;
+const LONG_RANGE_INPUT_MAX_WIDTH = 1920;
+const LONG_RANGE_INPUT_MAX_HEIGHT = 1080;
+const LONG_RANGE_FULL_SCAN_EVERY = 12;
+const LONG_RANGE_SCAN_CROP_SIZE = 0.28;
+const LONG_RANGE_CENTER_SCAN_CROP_SIZE = 0.48;
+const LONG_RANGE_MIN_LOCK_CROP = 0.09;
+const LONG_RANGE_MAX_LOCK_CROP = 0.62;
+const LONG_RANGE_LOCK_PADDING = 3.6;
+const LONG_RANGE_TRACK_BLEND = 0.46;
+const LONG_RANGE_REACQUIRE_HOLD_FRAMES = 90;
+const LONG_RANGE_SCAN_BURST_SIZE = 6;
+const LONG_RANGE_REACQUIRE_SCAN_AFTER_FRAMES = 8;
+const MIN_CATCH_RANGE = 0.0025;
 const DEFAULT_TRACKER_SETTINGS: TrackerSettings = {
-  predictionMode: "assist",
+  predictionMode: "extended",
   viewMode: "auto",
   edgeGuard: true,
   showSkeleton: true,
@@ -962,8 +964,14 @@ function longRangeScanTransform(state: LongRangeProcessingState): PoseInputTrans
 
   const centers: readonly Point[] = [
     { x: 0.5, y: 0.5 },
+    { x: 0.5, y: 0.35 },
+    { x: 0.5, y: 0.65 },
     { x: 0.25, y: 0.5 },
     { x: 0.75, y: 0.5 },
+    { x: 0.35, y: 0.35 },
+    { x: 0.65, y: 0.35 },
+    { x: 0.35, y: 0.65 },
+    { x: 0.65, y: 0.65 },
     { x: 0.5, y: 0.25 },
     { x: 0.5, y: 0.75 },
     { x: 0.25, y: 0.25 },
@@ -981,6 +989,39 @@ function longRangeScanTransform(state: LongRangeProcessingState): PoseInputTrans
 
   state.transform = cropAroundPoint(center.x, center.y, size);
   return state.transform;
+}
+
+function nextLongRangePoseTransforms(
+  state: LongRangeProcessingState,
+  memory: LandmarkTrackingMemory,
+  missingFrames: number
+): PoseInputTransform[] {
+  const trackedTransform = trackedLongRangeTransform(memory, missingFrames);
+
+  if (trackedTransform) {
+    const transform = blendPoseInputTransform(
+      state.transform,
+      trackedTransform,
+      LONG_RANGE_TRACK_BLEND
+    );
+    const transforms = [transform];
+    state.transform = transform;
+
+    if (missingFrames >= LONG_RANGE_REACQUIRE_SCAN_AFTER_FRAMES) {
+      for (let index = 1; index < LONG_RANGE_SCAN_BURST_SIZE; index += 1) {
+        transforms.push(longRangeScanTransform(state));
+      }
+    }
+
+    return transforms;
+  }
+
+  const transforms: PoseInputTransform[] = [];
+  for (let index = 0; index < LONG_RANGE_SCAN_BURST_SIZE; index += 1) {
+    transforms.push(longRangeScanTransform(state));
+  }
+
+  return transforms;
 }
 
 function trackedLongRangeTransform(
@@ -1047,16 +1088,11 @@ function ensureLongRangeCanvas(
   return canvas;
 }
 
-function prepareLongRangePoseInput(
+function renderLongRangePoseInput(
   video: HTMLVideoElement,
   state: LongRangeProcessingState,
-  memory: LandmarkTrackingMemory,
-  missingFrames: number
+  transform: PoseInputTransform
 ): PoseFrameInput {
-  const trackedTransform = trackedLongRangeTransform(memory, missingFrames);
-  const transform = trackedTransform
-    ? blendPoseInputTransform(state.transform, trackedTransform, LONG_RANGE_TRACK_BLEND)
-    : longRangeScanTransform(state);
   state.transform = transform;
 
   if (isFullPoseInputTransform(transform)) {
@@ -5309,6 +5345,8 @@ export default function AnalysisEngine({
   const lastAnalysisRef = useRef<FullAnalysis | null>(null);
   const lastStateUpdateRef = useRef(0);
   const missingFramesRef = useRef(0);
+  const poseScanFrameRef = useRef(0);
+  const missingCountedScanFrameRef = useRef(-1);
   const trackerSettingsRef = useRef<TrackerSettings>(DEFAULT_TRACKER_SETTINGS);
   const analysisPausedRef = useRef(false);
   const strokeFocusRef = useRef<StrokeFocus>("Auto");
@@ -5366,6 +5404,7 @@ export default function AnalysisEngine({
     lastAnalysisRef.current = null;
     lastStateUpdateRef.current = 0;
     missingFramesRef.current = 0;
+    missingCountedScanFrameRef.current = -1;
     setAnalysisState(null);
   }, []);
 
@@ -5495,7 +5534,10 @@ export default function AnalysisEngine({
       : null;
 
     if (!roughLandmarks || !isUsablePoseFrame(roughLandmarks, settings, swimmerProfile)) {
-      missingFramesRef.current += 1;
+      if (missingCountedScanFrameRef.current !== poseScanFrameRef.current) {
+        missingFramesRef.current += 1;
+        missingCountedScanFrameRef.current = poseScanFrameRef.current;
+      }
       const predictedLandmarks =
         maxPredictionFrames > 0
           ? predictLandmarksFromMemory(landmarkMemoryRef.current)
@@ -5752,16 +5794,37 @@ export default function AnalysisEngine({
             videoEl.videoHeight > 0;
 
           if (videoReady && !sendingFrame) {
-            const poseFrame = prepareLongRangePoseInput(
-              videoEl,
-              longRangeProcessingRef.current,
-              landmarkMemoryRef.current,
-              missingFramesRef.current
-            );
-            poseInputTransformRef.current = poseFrame.transform;
             sendingFrame = true;
-            void poseInstance
-              .send({ image: poseFrame.image })
+            poseScanFrameRef.current += 1;
+            const scanFrame = poseScanFrameRef.current;
+
+            void (async () => {
+              const transforms = nextLongRangePoseTransforms(
+                longRangeProcessingRef.current,
+                landmarkMemoryRef.current,
+                missingFramesRef.current
+              );
+
+              for (const transform of transforms) {
+                if (cancelled) break;
+
+                poseInputTransformRef.current = transform;
+                const poseFrame = renderLongRangePoseInput(
+                  videoEl,
+                  longRangeProcessingRef.current,
+                  transform
+                );
+
+                await poseInstance.send({ image: poseFrame.image });
+
+                const hasLock =
+                  missingFramesRef.current === 0 &&
+                  lastAnalysisRef.current !== null &&
+                  poseScanFrameRef.current === scanFrame;
+
+                if (hasLock) break;
+              }
+            })()
               .catch((error) => {
                 if (!cancelled) {
                   console.error("Pose frame send failed", error);
@@ -5812,6 +5875,7 @@ export default function AnalysisEngine({
       lastAnalysisRef.current = null;
       lastStateUpdateRef.current = 0;
       missingFramesRef.current = 0;
+      missingCountedScanFrameRef.current = -1;
       if (animationFrameId !== null) {
         window.cancelAnimationFrame(animationFrameId);
       }
