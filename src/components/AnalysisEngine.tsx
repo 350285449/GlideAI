@@ -484,7 +484,7 @@ const DEFAULT_TRACKER_SETTINGS: TrackerSettings = {
   edgeGuard: true,
   showSkeleton: true,
   showJoints: true,
-  showTrails: true,
+  showTrails: false,
   showCoachCues: false,
   mirrored: false,
   cameraFacingMode: "environment",
@@ -5284,10 +5284,15 @@ function resolvePoseCtor(mp: any): new (config: PoseConstructorConfig) => PoseIn
 
 export default function AnalysisEngine({
   onSessionComplete,
+  videoUrl,
+  adSegments = [],
 }: {
   onSessionComplete?: (sessionData: SessionCompleteData) => void;
+  videoUrl?: string | null;
+  adSegments?: [number, number][];
 }) {
   const webcamRef = useRef<Webcam>(null);
+  const externalVideoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const poseInputTransformRef = useRef<PoseInputTransform>(FULL_POSE_INPUT_TRANSFORM);
   const longRangeProcessingRef = useRef<LongRangeProcessingState>(
@@ -5702,7 +5707,7 @@ export default function AnalysisEngine({
   useEffect(() => {
     if (!videoStreamReady) return;
 
-    const videoEl = webcamRef.current?.video;
+    const videoEl = videoUrl ? externalVideoRef.current : webcamRef.current?.video;
     if (!videoEl) return;
 
     let cancelled = false;
@@ -5725,11 +5730,11 @@ export default function AnalysisEngine({
         });
 
         poseInstance.setOptions({
-          modelComplexity: 1,
+          modelComplexity: 2,
           smoothLandmarks: true,
           enableSegmentation: false,
-          minDetectionConfidence: 0.2,
-          minTrackingConfidence: 0.25,
+          minDetectionConfidence: 0.5,
+          minTrackingConfidence: 0.5,
         });
 
         poseInstance.onResults(onResults);
@@ -5842,39 +5847,72 @@ export default function AnalysisEngine({
       <div
         className={`relative min-h-[360px] w-full flex-1 overflow-hidden rounded-lg border bg-black shadow-2xl sm:min-h-[460px] xl:min-h-[calc(100vh-9rem)] ${selectedInterfaceStyle.videoClass}`}
       >
-        {cameraApiSupported && (
-          <Webcam
-            key={cameraRetryKey}
-            ref={webcamRef}
-            audio={false}
-            mirrored={trackerSettings.mirrored}
+        {videoUrl ? (
+          <video
+            ref={externalVideoRef}
+            src={videoUrl}
+            crossOrigin={videoUrl?.startsWith('blob:') ? undefined : "anonymous"}
+            autoPlay
+            playsInline
+            muted
             className="relative z-0 w-full h-full object-cover"
-            videoConstraints={cameraVideoConstraints(
-              trackerSettings.cameraFacingMode,
-              cameraFallbackMode
-            )}
-            onUserMedia={() => {
+            onLoadedData={() => {
               setCameraError(null);
               setVideoStreamReady(true);
             }}
-            onUserMediaError={(error) => {
-              setVideoStreamReady(false);
-              setCameraReady(false);
-              setIsLoaded(false);
-
-              if (
-                isRecoverableCameraStartupError(error) &&
-                cameraFallbackIndex < CAMERA_FALLBACK_MODES.length - 1
-              ) {
-                setCameraFallbackIndex((index) => index + 1);
-                setCameraError("Camera source could not start. Trying another camera mode...");
-                setCameraRetryKey((key) => key + 1);
-                return;
+            onTimeUpdate={(e) => {
+              if (adSegments.length > 0) {
+                const video = e.currentTarget;
+                const currentTime = video.currentTime;
+                for (const [start, end] of adSegments) {
+                  if (currentTime >= start && currentTime < end) {
+                    video.currentTime = end;
+                    break;
+                  }
+                }
               }
-
-              setCameraError(cameraErrorMessage(error));
+            }}
+            onEnded={() => {
+              if (!isAnalysisPaused) {
+                toggleAnalysis();
+              }
             }}
           />
+        ) : (
+          cameraApiSupported && (
+            <Webcam
+              key={cameraRetryKey}
+              ref={webcamRef}
+              audio={false}
+              mirrored={trackerSettings.mirrored}
+              className="relative z-0 w-full h-full object-cover"
+              videoConstraints={cameraVideoConstraints(
+                trackerSettings.cameraFacingMode,
+                cameraFallbackMode
+              )}
+              onUserMedia={() => {
+                setCameraError(null);
+                setVideoStreamReady(true);
+              }}
+              onUserMediaError={(error) => {
+                setVideoStreamReady(false);
+                setCameraReady(false);
+                setIsLoaded(false);
+
+                if (
+                  isRecoverableCameraStartupError(error) &&
+                  cameraFallbackIndex < CAMERA_FALLBACK_MODES.length - 1
+                ) {
+                  setCameraFallbackIndex((index) => index + 1);
+                  setCameraError("Camera source could not start. Trying another camera mode...");
+                  setCameraRetryKey((key) => key + 1);
+                  return;
+                }
+
+                setCameraError(cameraErrorMessage(error));
+              }}
+            />
+          )
         )}
         <canvas
           ref={canvasRef}

@@ -29,6 +29,11 @@ const AnalysisEngine = dynamic(
   { ssr: false }
 );
 
+const VideoReviewView = dynamic(
+  () => import("@/components/VideoReviewView"),
+  { ssr: false }
+);
+
 type ReportGrade = "A+" | "A" | "B" | "C" | "D";
 
 export interface SessionReportCard {
@@ -55,7 +60,7 @@ export interface SavedSession extends SessionDraft {
   reportCard: SessionReportCard;
 }
 
-type ViewType = "menu" | "session" | "history" | "overview";
+type ViewType = "menu" | "session" | "history" | "overview" | "video_review";
 
 async function quitApp() {
   if (typeof window === "undefined") return;
@@ -414,6 +419,10 @@ export default function AppHome() {
               <Play className="w-5 h-5"/>
               New Session
             </button>
+            <button onClick={() => navigateTo("video_review")} className={`flex items-center gap-3 p-3 rounded-lg transition ${view === "video_review" ? "bg-zinc-800 text-white" : "text-zinc-400 hover:bg-zinc-800/50 hover:text-zinc-200"}`}>
+              <Waves className="w-5 h-5"/>
+              Video Review
+            </button>
             <button onClick={() => navigateTo("history")} className={`flex items-center gap-3 p-3 rounded-lg transition ${view === "history" ? "bg-zinc-800 text-white" : "text-zinc-400 hover:bg-zinc-800/50 hover:text-zinc-200"}`}>
               <Clock className="w-5 h-5"/>
               History
@@ -494,7 +503,7 @@ export default function AppHome() {
               </p>
             </div>
 
-            <div className="grid sm:grid-cols-2 gap-6 max-w-2xl mx-auto w-full">
+            <div className="grid sm:grid-cols-3 gap-6 max-w-4xl mx-auto w-full">
               <button
                 type="button"
                 onClick={() => navigateTo("session")}
@@ -506,6 +515,20 @@ export default function AppHome() {
                 <div>
                   <h3 className="text-xl font-bold text-white mb-1">New Session</h3>
                   <p className="text-sm text-cyan-200/70">Start live camera analysis</p>
+                </div>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => navigateTo("video_review")}
+                className="group relative flex flex-col items-center gap-4 rounded-2xl border border-purple-500/30 bg-purple-950/20 p-8 text-center transition-all hover:border-purple-400/50 hover:bg-purple-900/30 hover:shadow-[0_0_30px_rgba(168,85,247,0.2)]"
+              >
+                <div className="flex h-16 w-16 items-center justify-center rounded-full bg-purple-500/20 text-purple-400 transition-transform group-hover:scale-110">
+                  <Waves className="h-8 w-8" />
+                </div>
+                <div>
+                  <h3 className="text-xl font-bold text-white mb-1">Video Review</h3>
+                  <p className="text-sm text-purple-200/70">Upload pre-recorded swim</p>
                 </div>
               </button>
 
@@ -658,6 +681,9 @@ export default function AppHome() {
 
         {view === "session" && (
           <AnalysisEngine onSessionComplete={handleSessionComplete} />
+        )}
+        {view === "video_review" && (
+          <VideoReviewView onSessionComplete={handleSessionComplete} />
         )}
       </section>
 
