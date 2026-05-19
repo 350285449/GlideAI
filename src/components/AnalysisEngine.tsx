@@ -198,6 +198,8 @@ interface MotionHistory {
 interface ArmAngleTrack {
   elbowAngle: number;
   verticality: number;
+  inCatchPhase: boolean;
+  isEVF: boolean;
   confidence: number;
   missingFrames: number;
 }
@@ -205,6 +207,13 @@ interface ArmAngleTrack {
 interface AngleMemory {
   left: ArmAngleTrack | null;
   right: ArmAngleTrack | null;
+}
+
+interface ViewMemory {
+  stableView: AnalysisView;
+  candidateView: AnalysisView | null;
+  candidateFrames: number;
+  missingFrames: number;
 }
 
 interface ActiveArmMemory {
@@ -327,6 +336,11 @@ interface PoseFrameInput {
   transform: PoseInputTransform;
 }
 
+interface PendingPoseFrame {
+  transform: PoseInputTransform;
+  scanFrame: number;
+}
+
 interface LongRangeProcessingState {
   canvas: HTMLCanvasElement | null;
   transform: PoseInputTransform;
@@ -405,19 +419,21 @@ const EVF_TOP_VIEW_ANGLE_MIN = 90;
 const EVF_TOP_VIEW_ANGLE_MAX = 140;
 const EVF_VERTICALITY_MIN = 70;
 const EVF_TOP_VIEW_VERTICALITY_MIN = 58;
-const CATCH_PHASE_THRESHOLD = 0.3;
-const CATCH_PHASE_EDGE_THRESHOLD = 0.28;
-const STROKE_RANGE_DECAY = 0.0025;
-const LANDMARK_SMOOTHING_ALPHA = 0.34;
-const LANDMARK_RELIABLE_VISIBILITY = 0.22;
-const LANDMARK_PARTIAL_VISIBILITY = 0.08;
-const LANDMARK_DRAW_VISIBILITY = 0.1;
-const HAND_PROXY_VISIBILITY = 0.16;
-const LOW_CONFIDENCE_JUMP_LIMIT = 0.11;
-const RELIABLE_JUMP_LIMIT = 0.24;
+const EVF_HYSTERESIS_DEGREES = 7;
+const EVF_VERTICALITY_HYSTERESIS = 6;
+const CATCH_PHASE_THRESHOLD = 0.34;
+const CATCH_PHASE_EDGE_THRESHOLD = 0.32;
+const STROKE_RANGE_DECAY = 0.0012;
+const LANDMARK_SMOOTHING_ALPHA = 0.28;
+const LANDMARK_RELIABLE_VISIBILITY = 0.2;
+const LANDMARK_PARTIAL_VISIBILITY = 0.06;
+const LANDMARK_DRAW_VISIBILITY = 0.08;
+const HAND_PROXY_VISIBILITY = 0.12;
+const LOW_CONFIDENCE_JUMP_LIMIT = 0.085;
+const RELIABLE_JUMP_LIMIT = 0.2;
 const ASSIST_PREDICTION_HOLD_FRAMES = 12;
-const EXTENDED_PREDICTION_HOLD_FRAMES = 36;
-const MOTION_HISTORY_LENGTH = 42;
+const EXTENDED_PREDICTION_HOLD_FRAMES = 54;
+const MOTION_HISTORY_LENGTH = 54;
 const DEFAULT_STYLE_CHECK_INTERVAL_MS = 5000;
 const MIN_STYLE_CHECK_INTERVAL_MS = 3000;
 const MAX_STYLE_CHECK_INTERVAL_MS = 15000;
@@ -431,6 +447,9 @@ const STROKE_SWITCH_CHECKS = 4;
 const STROKE_MEMORY_HOLD_CHECKS = 5;
 const MIN_STYLE_SAMPLE_QUALITY = 0.42;
 const MIN_STYLE_SAMPLE_CONFIDENCE = 0.34;
+const VIEW_ACQUIRE_FRAMES = 3;
+const VIEW_SWITCH_FRAMES = 8;
+const VIEW_HOLD_FRAMES = 24;
 const ACTIVE_ARM_ACQUIRE_FRAMES = 8;
 const ACTIVE_ARM_SWITCH_FRAMES = 48;
 const ACTIVE_ARM_HOLD_FRAMES = 45;
@@ -449,10 +468,10 @@ const FOREARM_SEGMENT_MAX = 0.58;
 const UPPER_ARM_SEGMENT_MAX = 0.52;
 const ARM_RATIO_MIN = 0.25;
 const ARM_RATIO_MAX = 3.4;
-const ANGLE_SMOOTHING_ALPHA = 0.34;
-const ANGLE_MAX_STEP_DEGREES = 9;
-const ANGLE_HOLD_FRAMES = 5;
-const MIN_ANGLE_CONFIDENCE = 0.22;
+const ANGLE_SMOOTHING_ALPHA = 0.26;
+const ANGLE_MAX_STEP_DEGREES = 6;
+const ANGLE_HOLD_FRAMES = 9;
+const MIN_ANGLE_CONFIDENCE = 0.18;
 const VOICE_CUE_COOLDOWN_MS = 15000;
 const VIDEO_WIDTH = 960;
 const VIDEO_HEIGHT = 540;
@@ -470,16 +489,17 @@ const FULL_POSE_INPUT_TRANSFORM: PoseInputTransform = Object.freeze({
 const LONG_RANGE_INPUT_MAX_WIDTH = 1920;
 const LONG_RANGE_INPUT_MAX_HEIGHT = 1080;
 const LONG_RANGE_FULL_SCAN_EVERY = 12;
-const LONG_RANGE_SCAN_CROP_SIZE = 0.28;
-const LONG_RANGE_CENTER_SCAN_CROP_SIZE = 0.48;
+const LONG_RANGE_SCAN_CROP_SIZE = 0.34;
+const LONG_RANGE_CENTER_SCAN_CROP_SIZE = 0.56;
 const LONG_RANGE_MIN_LOCK_CROP = 0.09;
-const LONG_RANGE_MAX_LOCK_CROP = 0.62;
-const LONG_RANGE_LOCK_PADDING = 3.6;
-const LONG_RANGE_TRACK_BLEND = 0.46;
+const LONG_RANGE_MAX_LOCK_CROP = 0.74;
+const LONG_RANGE_LOCK_PADDING = 4.2;
+const LONG_RANGE_TRACK_BLEND = 0.36;
 const LONG_RANGE_REACQUIRE_HOLD_FRAMES = 90;
-const LONG_RANGE_SCAN_BURST_SIZE = 6;
-const LONG_RANGE_REACQUIRE_SCAN_AFTER_FRAMES = 8;
+const LONG_RANGE_SCAN_BURST_SIZE = 8;
+const LONG_RANGE_REACQUIRE_SCAN_AFTER_FRAMES = 4;
 const MIN_CATCH_RANGE = 0.0025;
+const POSE_INPUT_WATER_FILTER = "brightness(1.08) contrast(1.22) saturate(1.38)";
 const DEFAULT_TRACKER_SETTINGS: TrackerSettings = {
   predictionMode: "extended",
   viewMode: "auto",
@@ -1095,10 +1115,6 @@ function renderLongRangePoseInput(
 ): PoseFrameInput {
   state.transform = transform;
 
-  if (isFullPoseInputTransform(transform)) {
-    return { image: video, transform };
-  }
-
   const canvas = ensureLongRangeCanvas(state, video);
   const ctx = canvas.getContext("2d");
   if (!ctx || video.videoWidth <= 0 || video.videoHeight <= 0) {
@@ -1112,8 +1128,10 @@ function renderLongRangePoseInput(
 
   ctx.imageSmoothingEnabled = true;
   ctx.imageSmoothingQuality = "high";
+  ctx.filter = POSE_INPUT_WATER_FILTER;
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   ctx.drawImage(video, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
+  ctx.filter = "none";
 
   return { image: canvas, transform };
 }
@@ -1297,7 +1315,7 @@ function stabilizeLandmarks(
       z: (prev.z ?? 0) + track.velocity.z * 0.18,
       visibility: Math.max(
         currentVisibility,
-        previousVisibility * (isPartial ? 0.68 : 0.46)
+        previousVisibility * (isPartial ? 0.78 : 0.72)
       ),
     };
 
@@ -1313,13 +1331,15 @@ function stabilizeLandmarks(
         ? 0.56
         : LANDMARK_SMOOTHING_ALPHA
       : isPartial
-        ? 0.24
+        ? rawJump > LOW_CONFIDENCE_JUMP_LIMIT
+          ? 0.14
+          : 0.2
         : 0.04;
     const base = isPartial ? prev : predicted;
     const visibility = isReliable
       ? Math.max(currentVisibility, previousVisibility * 0.9)
       : isPartial
-        ? Math.max(currentVisibility, previousVisibility * 0.55)
+        ? Math.max(currentVisibility, previousVisibility * 0.7)
         : landmarkVisibility(predicted);
     const next = blendLandmarks(base, filteredCurrent, alpha, visibility);
     const velocity = isPartial
@@ -1782,13 +1802,19 @@ function isUsablePoseFrame(
     (leftSignal.partial || rightSignal.partial) &&
     visibleUpperBody >= 3 &&
     reliableUpperBody >= 2;
+  const hasSubmergedArmTrace =
+    (leftSignal.score >= profileGeometry.minArmSignalScore * 0.7 ||
+      rightSignal.score >= profileGeometry.minArmSignalScore * 0.7) &&
+    visibleUpperBody >= 2 &&
+    (reliableUpperBody >= 1 || hasTopViewSignal(landmarks, profile));
 
   if (edgeUpperBody >= 5) return false;
 
   return (
-    (hasTopViewSignal(landmarks, profile) && reliableUpperBody >= 2) ||
+    (hasTopViewSignal(landmarks, profile) && reliableUpperBody >= 1) ||
     hasArmChain ||
-    (hasShoulderPair && hasPartialArmWithAnchor)
+    (hasShoulderPair && hasPartialArmWithAnchor) ||
+    hasSubmergedArmTrace
   );
 }
 
@@ -1994,12 +2020,12 @@ function createTrackingStatus(
       Math.min(bestArmScore / 2.1, 1) * 0.28 +
       pairedArmScore * 0.12 +
       completeArmBonus -
-      edgeLandmarks * 0.02,
+      edgeLandmarks * 0.018,
     0,
     1
   );
   const limited =
-    state === "live" && (quality < 0.55 || edgeLandmarks >= 2) ? "limited" : state;
+    state === "live" && (quality < 0.5 || edgeLandmarks >= 3) ? "limited" : state;
 
   return {
     state: limited,
@@ -2036,6 +2062,15 @@ function createAngleMemory(): AngleMemory {
   return {
     left: null,
     right: null,
+  };
+}
+
+function createViewMemory(): ViewMemory {
+  return {
+    stableView: "unknown",
+    candidateView: null,
+    candidateFrames: 0,
+    missingFrames: 0,
   };
 }
 
@@ -2095,6 +2130,12 @@ function normalizeStyleSample(
   shoulders: ShoulderMetrics
 ): StyleResult {
   const armComplete = tracking.leftArm.complete || tracking.rightArm.complete;
+  const partialArmReadable = [tracking.leftArm, tracking.rightArm].some(
+    (chain) =>
+      chain.elbow &&
+      (chain.wrist || chain.shoulder) &&
+      chain.score >= MIN_ARM_SIGNAL_SCORE * 0.62
+  );
   const armCoverage = clamp(
     Math.max(tracking.leftArm.score, tracking.rightArm.score) / 2.1,
     0,
@@ -2102,16 +2143,26 @@ function normalizeStyleSample(
   );
   const shoulderFactor = shoulders.visible ? 1 : 0.72;
   const qualityFactor = clamp(
-    tracking.quality * 0.68 + armCoverage * 0.22 + shoulderFactor * 0.1,
+    tracking.quality * 0.58 +
+      armCoverage * 0.2 +
+      shoulderFactor * 0.1 +
+      (partialArmReadable ? 0.12 : 0),
     0,
     1
   );
   const normalizedConfidence = clamp(result.confidence * qualityFactor, 0, 1);
+  const submergedReadable =
+    result.stroke !== "Unknown" &&
+    partialArmReadable &&
+    shoulders.visible &&
+    tracking.quality >= 0.3 &&
+    normalizedConfidence >= 0.24;
   const isReliable =
-    tracking.quality >= MIN_STYLE_SAMPLE_QUALITY &&
-    normalizedConfidence >= MIN_STYLE_SAMPLE_CONFIDENCE &&
-    (armComplete || tracking.quality >= 0.7) &&
-    shoulders.visible;
+    submergedReadable ||
+    (tracking.quality >= MIN_STYLE_SAMPLE_QUALITY &&
+      normalizedConfidence >= MIN_STYLE_SAMPLE_CONFIDENCE &&
+      (armComplete || partialArmReadable || tracking.quality >= 0.7) &&
+      shoulders.visible);
 
   if (!isReliable) {
     return {
@@ -2681,12 +2732,11 @@ function isInCatchWindow(
     : progress < CATCH_PHASE_THRESHOLD;
 }
 
-function isEVFGeometry(
-  elbowAngle: number,
-  verticality: number,
-  inCatchPhase: boolean,
-  view: ShoulderMetrics["view"]
-): boolean {
+function evfGeometryThresholds(view: ShoulderMetrics["view"]): {
+  angleMin: number;
+  angleMax: number;
+  verticalityMin: number;
+} {
   const angleMin =
     view === "top"
       ? EVF_TOP_VIEW_ANGLE_MIN
@@ -2706,10 +2756,24 @@ function isEVFGeometry(
         ? 62
         : EVF_VERTICALITY_MIN;
 
+  return { angleMin, angleMax, verticalityMin };
+}
+
+function isEVFGeometry(
+  elbowAngle: number,
+  verticality: number,
+  inCatchPhase: boolean,
+  view: ShoulderMetrics["view"],
+  relaxed = false
+): boolean {
+  const { angleMin, angleMax, verticalityMin } = evfGeometryThresholds(view);
+  const anglePadding = relaxed ? EVF_HYSTERESIS_DEGREES : 0;
+  const verticalityPadding = relaxed ? EVF_VERTICALITY_HYSTERESIS : 0;
+
   return (
-    elbowAngle >= angleMin &&
-    elbowAngle <= angleMax &&
-    verticality >= verticalityMin &&
+    elbowAngle >= angleMin - anglePadding &&
+    elbowAngle <= angleMax + anglePadding &&
+    verticality >= verticalityMin - verticalityPadding &&
     inCatchPhase
   );
 }
@@ -2769,16 +2833,20 @@ function stabilizeArmEVF(
     if (track && track.missingFrames < ANGLE_HOLD_FRAMES) {
       const heldTrack = {
         ...track,
-        confidence: track.confidence * 0.72,
+        confidence: track.confidence * 0.78,
         missingFrames: track.missingFrames + 1,
       };
+      const heldIsEVF =
+        heldTrack.isEVF &&
+        heldTrack.confidence >= MIN_ANGLE_CONFIDENCE * 0.62;
 
       return {
         evf: {
           ...raw,
           elbowAngle: heldTrack.elbowAngle,
           verticality: heldTrack.verticality,
-          isEVF: false,
+          inCatchPhase: heldIsEVF ? heldTrack.inCatchPhase : false,
+          isEVF: heldIsEVF,
           valid: heldTrack.confidence >= MIN_ANGLE_CONFIDENCE * 0.6,
           confidence: heldTrack.confidence,
         },
@@ -2795,6 +2863,8 @@ function stabilizeArmEVF(
       track: {
         elbowAngle: raw.elbowAngle,
         verticality: raw.verticality,
+        inCatchPhase: raw.inCatchPhase,
+        isEVF: raw.isEVF,
         confidence: raw.confidence,
         missingFrames: 0,
       },
@@ -2813,6 +2883,12 @@ function stabilizeArmEVF(
     track.verticality * (1 - ANGLE_SMOOTHING_ALPHA) +
     limitedVerticality * ANGLE_SMOOTHING_ALPHA;
   const confidence = track.confidence * 0.5 + raw.confidence * 0.5;
+  const inCatchPhase = raw.inCatchPhase || (track.isEVF && track.missingFrames < 2);
+  const isEVF =
+    isEVFGeometry(elbowAngle, verticality, inCatchPhase, view) ||
+    (track.isEVF &&
+      isEVFGeometry(elbowAngle, verticality, inCatchPhase, view, true) &&
+      confidence >= MIN_ANGLE_CONFIDENCE * 0.8);
 
   return {
     evf: {
@@ -2820,11 +2896,14 @@ function stabilizeArmEVF(
       elbowAngle,
       verticality,
       confidence,
-      isEVF: isEVFGeometry(elbowAngle, verticality, raw.inCatchPhase, view),
+      inCatchPhase,
+      isEVF,
     },
     track: {
       elbowAngle,
       verticality,
+      inCatchPhase,
+      isEVF,
       confidence,
       missingFrames: 0,
     },
@@ -2987,21 +3066,103 @@ function getShoulderMetrics(
   };
 }
 
-function resolveCameraViewMetrics(
-  autoMetrics: ShoulderMetrics,
-  viewMode: CameraViewMode
-): ShoulderMetrics {
-  if (viewMode === "auto") return autoMetrics;
-
+function withResolvedView(metrics: ShoulderMetrics, view: AnalysisView): ShoulderMetrics {
   const sideTracked =
-    autoMetrics.trackedSide === "none" ? "both" : autoMetrics.trackedSide;
+    metrics.trackedSide === "none" ? "both" : metrics.trackedSide;
 
   return {
-    ...autoMetrics,
-    view: viewMode,
+    ...metrics,
+    view,
     trackedSide:
-      viewMode === "side" || viewMode === "top-side" ? sideTracked : "both",
+      view === "side" || view === "top-side"
+        ? sideTracked
+        : view === "unknown"
+          ? metrics.trackedSide
+          : "both",
   };
+}
+
+function stabilizeAutoViewMetrics(
+  autoMetrics: ShoulderMetrics,
+  memory: ViewMemory
+): ShoulderMetrics {
+  const observedView = autoMetrics.visible ? autoMetrics.view : "unknown";
+
+  if (observedView === "unknown") {
+    memory.missingFrames += 1;
+    memory.candidateView = null;
+    memory.candidateFrames = 0;
+
+    if (
+      memory.stableView !== "unknown" &&
+      memory.missingFrames <= VIEW_HOLD_FRAMES
+    ) {
+      return withResolvedView(autoMetrics, memory.stableView);
+    }
+
+    memory.stableView = "unknown";
+    return withResolvedView(autoMetrics, "unknown");
+  }
+
+  memory.missingFrames = 0;
+
+  if (memory.stableView === "unknown") {
+    if (memory.candidateView === observedView) {
+      memory.candidateFrames += 1;
+    } else {
+      memory.candidateView = observedView;
+      memory.candidateFrames = 1;
+    }
+
+    if (memory.candidateFrames >= VIEW_ACQUIRE_FRAMES) {
+      memory.stableView = observedView;
+      memory.candidateView = null;
+      memory.candidateFrames = 0;
+    }
+
+    return withResolvedView(
+      autoMetrics,
+      memory.stableView === "unknown" ? observedView : memory.stableView
+    );
+  }
+
+  if (observedView === memory.stableView) {
+    memory.candidateView = null;
+    memory.candidateFrames = 0;
+    return withResolvedView(autoMetrics, memory.stableView);
+  }
+
+  if (memory.candidateView === observedView) {
+    memory.candidateFrames += 1;
+  } else {
+    memory.candidateView = observedView;
+    memory.candidateFrames = 1;
+  }
+
+  if (memory.candidateFrames >= VIEW_SWITCH_FRAMES) {
+    memory.stableView = observedView;
+    memory.candidateView = null;
+    memory.candidateFrames = 0;
+  }
+
+  return withResolvedView(autoMetrics, memory.stableView);
+}
+
+function resolveCameraViewMetrics(
+  autoMetrics: ShoulderMetrics,
+  viewMode: CameraViewMode,
+  memory: ViewMemory
+): ShoulderMetrics {
+  if (viewMode === "auto") {
+    return stabilizeAutoViewMetrics(autoMetrics, memory);
+  }
+
+  memory.stableView = viewMode;
+  memory.candidateView = null;
+  memory.candidateFrames = 0;
+  memory.missingFrames = 0;
+
+  return withResolvedView(autoMetrics, viewMode);
 }
 
 function classifyStroke(
@@ -4503,7 +4664,7 @@ function MetricsPanel({
                       Local
                     </span>
                     <span className="rounded-md border border-zinc-800 bg-zinc-900/70 px-2 py-1 font-mono text-xs text-zinc-300">
-                      {manualCoach.estimatedScore.score}/5
+                      L{manualCoach.estimatedScore.level} {manualCoach.estimatedScore.levelPercent}%
                     </span>
                   </div>
                 </div>
@@ -4518,7 +4679,9 @@ function MetricsPanel({
                     <p className="font-semibold text-zinc-200">
                       {manualCoach.estimatedScore.label}
                     </p>
-                    <p className="mt-1 text-zinc-500">{manualCoach.strokeLabel}</p>
+                    <p className="mt-1 text-zinc-500">
+                      {manualCoach.estimatedScore.display}
+                    </p>
                   </div>
                 </div>
                 <div className="mt-3 rounded-md border border-zinc-800 bg-zinc-900/50 px-3 py-2">
@@ -4546,7 +4709,7 @@ function MetricsPanel({
                           {item.skill}
                         </p>
                         <span className="font-mono text-[11px] text-cyan-300">
-                          {item.score}/5
+                          L{item.level} {item.levelPercent}%
                         </span>
                       </div>
                       <p className="mt-1 line-clamp-2 text-zinc-500">{item.cue}</p>
@@ -5326,6 +5489,7 @@ export default function AnalysisEngine({
   const webcamRef = useRef<Webcam>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const poseInputTransformRef = useRef<PoseInputTransform>(FULL_POSE_INPUT_TRANSFORM);
+  const pendingPoseFramesRef = useRef<PendingPoseFrame[]>([]);
   const longRangeProcessingRef = useRef<LongRangeProcessingState>(
     createLongRangeProcessingState()
   );
@@ -5334,6 +5498,7 @@ export default function AnalysisEngine({
   const motionHistoryRef = useRef<MotionHistory>(createMotionHistory());
   const strokeBeliefRef = useRef<StrokeBeliefState>(createStrokeBelief());
   const angleMemoryRef = useRef<AngleMemory>(createAngleMemory());
+  const viewMemoryRef = useRef<ViewMemory>(createViewMemory());
   const strokeMemoryRef = useRef<StrokeMemory>(createStrokeMemory());
   const styleAccumulatorRef = useRef<StyleAccumulator>(createStyleAccumulator());
   const styleWindowStartedAtRef = useRef(0);
@@ -5347,6 +5512,9 @@ export default function AnalysisEngine({
   const missingFramesRef = useRef(0);
   const poseScanFrameRef = useRef(0);
   const missingCountedScanFrameRef = useRef(-1);
+  const predictedScanFrameRef = useRef(-1);
+  const predictedLandmarksRef = useRef<NormalizedLandmark[] | null>(null);
+  const lastResultScanFrameRef = useRef(0);
   const trackerSettingsRef = useRef<TrackerSettings>(DEFAULT_TRACKER_SETTINGS);
   const analysisPausedRef = useRef(false);
   const strokeFocusRef = useRef<StrokeFocus>("Auto");
@@ -5389,6 +5557,7 @@ export default function AnalysisEngine({
     motionHistoryRef.current = createMotionHistory();
     resetStrokeBelief(strokeBeliefRef.current);
     angleMemoryRef.current = createAngleMemory();
+    viewMemoryRef.current = createViewMemory();
     strokeMemoryRef.current = createStrokeMemory();
     styleAccumulatorRef.current = createStyleAccumulator();
     styleWindowStartedAtRef.current = 0;
@@ -5397,6 +5566,7 @@ export default function AnalysisEngine({
     armIdentityMemoryRef.current = createArmIdentityMemory();
     activeArmMemoryRef.current = createActiveArmMemory();
     poseInputTransformRef.current = FULL_POSE_INPUT_TRANSFORM;
+    pendingPoseFramesRef.current = [];
     if (resetLongRangeScan) {
       longRangeProcessingRef.current = createLongRangeProcessingState();
     }
@@ -5405,6 +5575,11 @@ export default function AnalysisEngine({
     lastStateUpdateRef.current = 0;
     missingFramesRef.current = 0;
     missingCountedScanFrameRef.current = -1;
+    predictedScanFrameRef.current = -1;
+    predictedLandmarksRef.current = null;
+    lastResultScanFrameRef.current = 0;
+    lastFrameTimestampRef.current = 0;
+    fpsRef.current = 0;
     setAnalysisState(null);
   }, []);
 
@@ -5488,6 +5663,15 @@ export default function AnalysisEngine({
   }, []);
 
   const onResults = useCallback((results: Results) => {
+    const pendingFrame = pendingPoseFramesRef.current.shift();
+    const resultTransform = pendingFrame?.transform ?? poseInputTransformRef.current;
+    const resultScanFrame = pendingFrame?.scanFrame ?? poseScanFrameRef.current;
+
+    if (resultScanFrame < lastResultScanFrameRef.current) {
+      return;
+    }
+    lastResultScanFrameRef.current = resultScanFrame;
+
     const canvas = canvasRef.current;
     if (!canvas) return;
 
@@ -5523,7 +5707,7 @@ export default function AnalysisEngine({
 
     const maxPredictionFrames = predictionHoldFrames(settings.predictionMode);
     const rawLandmarks = results.poseLandmarks
-      ? remapLongRangeLandmarks(results.poseLandmarks, poseInputTransformRef.current)
+      ? remapLongRangeLandmarks(results.poseLandmarks, resultTransform)
       : null;
     const roughLandmarks = rawLandmarks
       ? cleanUnstableArmGeometry(
@@ -5534,14 +5718,22 @@ export default function AnalysisEngine({
       : null;
 
     if (!roughLandmarks || !isUsablePoseFrame(roughLandmarks, settings, swimmerProfile)) {
-      if (missingCountedScanFrameRef.current !== poseScanFrameRef.current) {
+      if (missingCountedScanFrameRef.current !== resultScanFrame) {
         missingFramesRef.current += 1;
-        missingCountedScanFrameRef.current = poseScanFrameRef.current;
+        missingCountedScanFrameRef.current = resultScanFrame;
+        predictedScanFrameRef.current = -1;
+        predictedLandmarksRef.current = null;
       }
-      const predictedLandmarks =
-        maxPredictionFrames > 0
-          ? predictLandmarksFromMemory(landmarkMemoryRef.current)
-          : null;
+      let predictedLandmarks: NormalizedLandmark[] | null = null;
+      if (maxPredictionFrames > 0) {
+        if (predictedScanFrameRef.current === resultScanFrame) {
+          predictedLandmarks = predictedLandmarksRef.current;
+        } else {
+          predictedLandmarks = predictLandmarksFromMemory(landmarkMemoryRef.current);
+          predictedScanFrameRef.current = resultScanFrame;
+          predictedLandmarksRef.current = predictedLandmarks;
+        }
+      }
       const predicted = predictedLandmarks
         ? enhanceSwimLandmarks(predictedLandmarks)
         : null;
@@ -5587,6 +5779,8 @@ export default function AnalysisEngine({
     }
     if (!rawLandmarks) return;
     missingFramesRef.current = 0;
+    predictedScanFrameRef.current = -1;
+    predictedLandmarksRef.current = null;
 
     const smoothed = enhanceSwimLandmarks(
       stabilizeLandmarks(rawLandmarks, landmarkMemoryRef.current, settings)
@@ -5608,6 +5802,7 @@ export default function AnalysisEngine({
       motionHistoryRef.current = createMotionHistory();
       resetStrokeBelief(strokeBeliefRef.current);
       angleMemoryRef.current = createAngleMemory();
+      viewMemoryRef.current = createViewMemory();
       styleAccumulatorRef.current = createStyleAccumulator();
       styleWindowStartedAtRef.current = now;
     }
@@ -5625,7 +5820,8 @@ export default function AnalysisEngine({
     const motion = updateMotionHistory(motionHistoryRef.current, lm);
     const shoulders = resolveCameraViewMetrics(
       getShoulderMetrics(lm, swimmerProfile),
-      settings.viewMode
+      settings.viewMode,
+      viewMemoryRef.current
     );
     const sr = strokeRangeRef.current;
     updateStrokeRange(sr, lm);
@@ -5808,14 +6004,35 @@ export default function AnalysisEngine({
               for (const transform of transforms) {
                 if (cancelled) break;
 
-                poseInputTransformRef.current = transform;
+                const queuedTransform = { ...transform };
+                poseInputTransformRef.current = queuedTransform;
+                pendingPoseFramesRef.current.push({
+                  transform: queuedTransform,
+                  scanFrame,
+                });
+                if (pendingPoseFramesRef.current.length > LONG_RANGE_SCAN_BURST_SIZE * 2) {
+                  pendingPoseFramesRef.current.splice(
+                    0,
+                    pendingPoseFramesRef.current.length - LONG_RANGE_SCAN_BURST_SIZE
+                  );
+                }
                 const poseFrame = renderLongRangePoseInput(
                   videoEl,
                   longRangeProcessingRef.current,
-                  transform
+                  queuedTransform
                 );
 
-                await poseInstance.send({ image: poseFrame.image });
+                try {
+                  await poseInstance.send({ image: poseFrame.image });
+                } catch (error) {
+                  const queuedIndex = pendingPoseFramesRef.current.findIndex(
+                    (frame) => frame.transform === queuedTransform
+                  );
+                  if (queuedIndex !== -1) {
+                    pendingPoseFramesRef.current.splice(queuedIndex, 1);
+                  }
+                  throw error;
+                }
 
                 const hasLock =
                   missingFramesRef.current === 0 &&
@@ -5862,6 +6079,7 @@ export default function AnalysisEngine({
       motionHistoryRef.current = createMotionHistory();
       resetStrokeBelief(strokeBelief);
       angleMemoryRef.current = createAngleMemory();
+      viewMemoryRef.current = createViewMemory();
       strokeMemoryRef.current = createStrokeMemory();
       styleAccumulatorRef.current = createStyleAccumulator();
       styleWindowStartedAtRef.current = 0;
@@ -5870,12 +6088,18 @@ export default function AnalysisEngine({
       armIdentityMemoryRef.current = createArmIdentityMemory();
       activeArmMemoryRef.current = createActiveArmMemory();
       poseInputTransformRef.current = FULL_POSE_INPUT_TRANSFORM;
+      pendingPoseFramesRef.current = [];
       longRangeProcessingRef.current = createLongRangeProcessingState();
       strokeRangeRef.current = { minX: 1, maxX: 0, minY: 1, maxY: 0 };
       lastAnalysisRef.current = null;
       lastStateUpdateRef.current = 0;
       missingFramesRef.current = 0;
       missingCountedScanFrameRef.current = -1;
+      predictedScanFrameRef.current = -1;
+      predictedLandmarksRef.current = null;
+      lastResultScanFrameRef.current = 0;
+      lastFrameTimestampRef.current = 0;
+      fpsRef.current = 0;
       if (animationFrameId !== null) {
         window.cancelAnimationFrame(animationFrameId);
       }
@@ -5945,7 +6169,7 @@ export default function AnalysisEngine({
           className="absolute inset-0 w-full h-full pointer-events-none z-[100]"
           aria-hidden
         />
-        <div className="pointer-events-none absolute left-4 top-4 z-[105] flex flex-wrap gap-2">9*
+        <div className="pointer-events-none absolute left-4 top-4 z-[105] flex flex-wrap gap-2">
           <span className="rounded-md border border-zinc-700/80 bg-black/60 px-2.5 py-1 text-xs font-medium text-zinc-200 backdrop-blur-md">
             {cameraViewBadgeLabel(
               trackerSettings.viewMode,

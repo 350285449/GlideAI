@@ -28,6 +28,7 @@ const LABEL_INDEX = {
   Butterfly: 2,
   Breaststroke: 3,
 };
+const LABELS = Object.keys(LABEL_INDEX);
 
 function softmax(logits) {
   const m = Math.max(...logits);
@@ -40,6 +41,12 @@ function train(samples, { epochs = 450, learningRate = 0.08, l2 = 0.0005 } = {})
   const featureCount = FEATURE_KEYS.length;
   const weights = Array.from({ length: 4 }, () => Array.from({ length: featureCount }, () => 0));
   const biases = [0, 0, 0, 0];
+  const labelCounts = [0, 0, 0, 0];
+
+  for (const sample of samples) {
+    const y = LABEL_INDEX[sample.label];
+    if (y !== undefined) labelCounts[y] += 1;
+  }
 
   for (let epoch = 0; epoch < epochs; epoch++) {
     for (const sample of samples) {
@@ -66,7 +73,7 @@ function train(samples, { epochs = 450, learningRate = 0.08, l2 = 0.0005 } = {})
     }
   }
 
-  return { featureKeys: FEATURE_KEYS, weights, biases };
+  return { featureKeys: FEATURE_KEYS, labelCounts, weights, biases };
 }
 
 async function main() {
@@ -78,6 +85,12 @@ async function main() {
     throw new Error("Samples JSON must be a non-empty array.");
   }
   const model = train(samples);
+  const missingLabels = LABELS.filter((label) => model.labelCounts[LABEL_INDEX[label]] === 0);
+  if (missingLabels.length > 0) {
+    console.warn(
+      `Warning: calibration is missing ${missingLabels.join(", ")} samples; runtime will ignore this under-covered model.`
+    );
+  }
   await fs.mkdir(path.dirname(path.resolve(output)), { recursive: true });
   await fs.writeFile(path.resolve(output), `${JSON.stringify(model, null, 2)}\n`, "utf8");
   console.log(`Saved calibration model to ${output}`);

@@ -29,12 +29,13 @@ const AnalysisEngine = dynamic(
   { ssr: false }
 );
 
-type ReportGrade = "A+" | "A" | "B" | "C" | "D";
+type ReportLevel = 0 | 1 | 2 | 3 | 4 | 5;
 
 export interface SessionReportCard {
   generatedAt: string;
   score: number;
-  grade: ReportGrade;
+  level: ReportLevel;
+  levelPercent: number;
   headline: string;
   highlights: string[];
   improvements: string[];
@@ -91,22 +92,27 @@ function pluralize(count: number, singular: string, plural = `${singular}s`) {
   return `${count} ${count === 1 ? singular : plural}`;
 }
 
-function gradeForScore(score: number): ReportGrade {
-  if (score >= 94) return "A+";
-  if (score >= 85) return "A";
-  if (score >= 74) return "B";
-  if (score >= 62) return "C";
-  return "D";
+function levelForScore(score: number): { level: ReportLevel; levelPercent: number } {
+  const rawLevel = clamp(score / 20, 0, 5);
+  if (rawLevel >= 5) {
+    return { level: 5, levelPercent: 100 };
+  }
+
+  const level = Math.floor(rawLevel) as ReportLevel;
+  return {
+    level,
+    levelPercent: Math.round((rawLevel - level) * 100),
+  };
 }
 
-function reportGradeClass(grade: ReportGrade) {
-  if (grade === "A+" || grade === "A") {
+function reportLevelClass(level: ReportLevel) {
+  if (level >= 4) {
     return "border-emerald-500/40 bg-emerald-500/10 text-emerald-300";
   }
-  if (grade === "B") {
+  if (level === 3) {
     return "border-cyan-500/40 bg-cyan-500/10 text-cyan-300";
   }
-  if (grade === "C") {
+  if (level === 2) {
     return "border-amber-500/40 bg-amber-500/10 text-amber-300";
   }
   return "border-zinc-700 bg-zinc-800/70 text-zinc-300";
@@ -140,7 +146,7 @@ function generateSessionReportCard(session: SessionDraft): SessionReportCard {
       sessionEvidenceScore * 0.15 +
       lapScore * 0.1
   );
-  const grade = gradeForScore(score);
+  const levelProgress = levelForScore(score);
   const primaryCue = commonCue(session.marks);
 
   const highlights = [
@@ -180,11 +186,12 @@ function generateSessionReportCard(session: SessionDraft): SessionReportCard {
   return {
     generatedAt: new Date().toISOString(),
     score,
-    grade,
+    level: levelProgress.level,
+    levelPercent: levelProgress.levelPercent,
     headline:
-      score >= 85
+      levelProgress.level >= 4
         ? "Clean session with strong technique signals."
-        : score >= 70
+        : levelProgress.level >= 3
           ? "Solid set with clear next-step cues."
           : "Useful baseline. Build consistency next.",
     highlights,
@@ -199,7 +206,11 @@ function isReportCard(value: unknown): value is SessionReportCard {
   return (
     typeof candidate.generatedAt === "string" &&
     typeof candidate.score === "number" &&
-    typeof candidate.grade === "string" &&
+    typeof candidate.level === "number" &&
+    Number.isInteger(candidate.level) &&
+    candidate.level >= 0 &&
+    candidate.level <= 5 &&
+    typeof candidate.levelPercent === "number" &&
     typeof candidate.headline === "string" &&
     Array.isArray(candidate.highlights) &&
     Array.isArray(candidate.improvements) &&
@@ -278,12 +289,17 @@ function ReportCardView({
           </p>
         </div>
         <div
-          className={`flex min-w-[5.5rem] flex-col items-center rounded-xl border px-4 py-3 ${reportGradeClass(
-            reportCard.grade
+          className={`flex min-w-[6.5rem] flex-col items-center rounded-xl border px-4 py-3 ${reportLevelClass(
+            reportCard.level
           )}`}
         >
-          <span className="text-3xl font-black leading-none">{reportCard.grade}</span>
-          <span className="mt-1 font-mono text-xs">{reportCard.score}/100</span>
+          <span className="text-3xl font-black leading-none">L{reportCard.level}</span>
+          <span className="mt-1 font-mono text-xs">
+            {reportCard.levelPercent}% level
+          </span>
+          <span className="mt-0.5 font-mono text-[10px] opacity-70">
+            {reportCard.score}/100
+          </span>
         </div>
       </div>
 

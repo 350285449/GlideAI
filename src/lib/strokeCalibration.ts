@@ -41,9 +41,14 @@ export function trainStrokeCalibrationModel(
     Array.from({ length: featureCount }, () => 0),
   ];
   const biases: [number, number, number, number] = [0, 0, 0, 0];
+  const labelCounts: [number, number, number, number] = [0, 0, 0, 0];
+
+  for (const sample of samples) {
+    labelCounts[LABEL_INDEX[sample.label]] += 1;
+  }
 
   if (samples.length === 0) {
-    return { featureKeys: keys, weights, biases };
+    return { featureKeys: keys, weights, biases, labelCounts };
   }
 
   for (let epoch = 0; epoch < epochs; epoch++) {
@@ -73,6 +78,7 @@ export function trainStrokeCalibrationModel(
 
   return {
     featureKeys: keys,
+    labelCounts,
     weights,
     biases,
   };

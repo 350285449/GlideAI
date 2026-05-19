@@ -25,9 +25,10 @@ const LM = {
   R_ANK: 28,
 } as const;
 
-const PARTIAL_VIS = 0.14;
+const PARTIAL_VIS = 0.08;
 const MIN_ALIGNED = 18;
 const TEMPERATURE = 0.88;
+const MIN_CALIBRATION_CLASS_SAMPLES = 1;
 const LONG_RANGE_SHOULDER_NORM = 0.028;
 const BASE_SHOULDER_NORM = 0.08;
 
@@ -108,6 +109,7 @@ export type StrokeFeatureVector = Record<StrokeFeatureKey, number>;
 
 export interface StrokeCalibrationModel {
   featureKeys: readonly StrokeFeatureKey[];
+  labelCounts?: readonly [number, number, number, number];
   biases: [number, number, number, number];
   weights: [
     number[],
@@ -533,10 +535,14 @@ function applyCalibrationAdjustments(
   features: StrokeFeatureVector,
   model: StrokeCalibrationModel | null
 ): [number, number, number, number] {
-  if (!model) return logits;
+  if (!model || !calibrationModelIsUsable(model)) return logits;
   const keys = model.featureKeys;
-  if (keys.length === 0) return logits;
-  const adjusted: [number, number, number, number] = [...logits] as [number, number, number, number];
+  const adjusted: [number, number, number, number] = [...logits] as [
+    number,
+    number,
+    number,
+    number,
+  ];
   for (let cls = 0; cls < 4; cls++) {
     let delta = model.biases[cls] ?? 0;
     const w = model.weights[cls] ?? [];
@@ -548,6 +554,26 @@ function applyCalibrationAdjustments(
     adjusted[cls] += delta;
   }
   return adjusted;
+}
+
+/** Calibration may only nudge the heuristic classifier when every stroke has examples. */
+function calibrationModelIsUsable(model: StrokeCalibrationModel): boolean {
+  const counts = model.labelCounts;
+  if (!counts || counts.length !== 4) return false;
+  if (model.biases.length !== 4 || model.weights.length !== 4) return false;
+  if (model.featureKeys.length !== STROKE_FEATURE_KEYS.length) return false;
+  if (!STROKE_FEATURE_KEYS.every((key, index) => model.featureKeys[index] === key)) {
+    return false;
+  }
+  if (model.weights.some((weights) => weights.length !== model.featureKeys.length)) {
+    return false;
+  }
+
+  return counts.every(
+    (count) =>
+      Number.isFinite(count) &&
+      count >= MIN_CALIBRATION_CLASS_SAMPLES
+  );
 }
 
 const IDX = { F: 0, B: 1, FI: 2, BR: 3 };
@@ -569,6 +595,31 @@ export function classifySwimStroke(
   const leftTravel = motion.left.rangeX + motion.left.rangeY;
   const rightTravel = motion.right.rangeX + motion.right.rangeY;
   const bilateralTravel = leftTravel + rightTravel;
+  const pairedHistoryX = alignedAxisSeries(
+    motionHistory.leftWrist,
+    motionHistory.rightWrist,
+    "x"
+  );
+  const pairedHistoryY = alignedAxisSeries(
+    motionHistory.leftWrist,
+    motionHistory.rightWrist,
+    "y"
+  );
+  const pairedElbowHistoryX = alignedAxisSeries(
+    motionHistory.leftElbow,
+    motionHistory.rightElbow,
+    "x"
+  );
+  const pairedElbowHistoryY = alignedAxisSeries(
+    motionHistory.leftElbow,
+    motionHistory.rightElbow,
+    "y"
+  );
+  const hasPairedWaterHistory =
+    Boolean(pairedHistoryX || pairedHistoryY) &&
+    (ctx.bothArmsChainVisible ||
+      Boolean(pairedElbowHistoryX || pairedElbowHistoryY) ||
+      partialArmCount > 0);
 
   if (!primaryArm && partialArmCount === 0) {
     return {
@@ -579,19 +630,25 @@ export function classifySwimStroke(
 
   const view = shoulders.view;
 
-  if (view === "side" || !ctx.bothArmsChainVisible) {
+  if (view === "side" || (!ctx.bothArmsChainVisible && !hasPairedWaterHistory)) {
     const sideArm = primaryArm ?? "left";
     const pm = motion[sideArm === "left" ? "left" : "right"];
     const samplesOk = pm.samples >= 10;
     const sideMotionThreshold = scaleByShoulder(0.052, shoulders, 0.26);
     const sideTravelThreshold = scaleByShoulder(0.1, shoulders, 0.28);
+    const sideArmTravel = pm.rangeX + pm.rangeY;
     const strokeMotion =
       samplesOk &&
       (pm.rangeX > sideMotionThreshold || pm.rangeY > sideMotionThreshold);
+    const hasSingleArmEvidence =
+      partialArmCount > 0 &&
+      sideArmTravel > sideTravelThreshold * 0.46;
+    const hasPairedArmEvidence =
+      partialArmCount >= 2 &&
+      bilateralTravel > sideTravelThreshold;
     const lowEvidence =
       !strokeMotion ||
-      partialArmCount < 2 ||
-      bilateralTravel < sideTravelThreshold;
+      (!hasSingleArmEvidence && !hasPairedArmEvidence);
     if (lowEvidence) {
       return {
         stroke: "Unknown",
@@ -599,27 +656,58 @@ export function classifySwimStroke(
       };
     }
 
-    if (view === "side") {
+    const lower = lowerBodySnapshot(lm, shoulders);
+    const sideIndices =
+      sideArm === "left"
+        ? { elbow: LM.L_EL, wrist: LM.L_WR }
+        : { elbow: LM.R_EL, wrist: LM.R_WR };
+    const sideWrist = lm[sideIndices.wrist];
+    const sideElbow = lm[sideIndices.elbow];
+    const sideBackCue =
+      view === "side" &&
+      landmarkVisible(sideWrist) &&
+      landmarkVisible(sideElbow) &&
+      sideWrist.y > shoulders.centerY &&
+      sideWrist.y + 0.006 < sideElbow.y &&
+      lower.kickAlternating >= lower.kickSymmetric - 0.05;
+    const longAxisSingleArm =
+      samplesOk &&
+      partialArmCount > 0 &&
+      pm.rangeX > sideMotionThreshold * 1.2 &&
+      pm.rangeY > sideMotionThreshold * 0.82 &&
+      lower.kickAlternating >= lower.kickSymmetric - 0.08;
+    const symmetricKickCue =
+      lower.kickSymmetric > 0.72 &&
+      lower.kneeFlexSync > 0.68 &&
+      bilateralTravel > sideTravelThreshold * 0.92;
+
+    if (longAxisSingleArm) {
       return {
-        stroke: "Unknown",
-        confidence: 0.48,
+        stroke: sideBackCue ? "Backstroke" : "Freestyle",
+        confidence: view === "side" ? 0.54 : 0.58,
+      };
+    }
+
+    if (symmetricKickCue && (view === "top-side" || view === "side")) {
+      return {
+        stroke: "Breaststroke",
+        confidence: view === "side" ? 0.52 : 0.55,
       };
     }
 
     return {
-      stroke: "Freestyle",
-      confidence: 0.5,
+      stroke: "Unknown",
+      confidence: 0.42,
     };
   }
 
   const axis = dominantAxis(motion);
-  let paired = alignedAxisSeries(motionHistory.leftWrist, motionHistory.rightWrist, axis);
+  let paired =
+    axis === "x"
+      ? pairedHistoryX
+      : pairedHistoryY;
   if (!paired) {
-    paired = alignedAxisSeries(
-      motionHistory.leftWrist,
-      motionHistory.rightWrist,
-      axis === "x" ? "y" : "x"
-    );
+    paired = axis === "x" ? pairedHistoryY : pairedHistoryX;
   }
 
   const corr = dualAxisCorrelationBlend(motionHistory.leftWrist, motionHistory.rightWrist);
@@ -828,6 +916,7 @@ export function classifySwimStroke(
   const best = order[0]!;
   const second = order[1]!;
   const probabilityGap = best.p - second.p;
+  const occludedWaterRead = !ctx.bothArmsChainVisible && hasPairedWaterHistory;
 
   let confidence = clamp((best.p - second.p) / Math.max(best.p, 0.075), 0.34, 0.93);
 
@@ -843,11 +932,15 @@ export function classifySwimStroke(
   if (probabilityGap < 0.075) {
     confidence *= 0.72;
   }
+  if (occludedWaterRead) {
+    confidence *= 0.9;
+  }
 
   if (
-    (confidence < 0.5 && hNorm > 0.78) ||
-    best.p < 0.28 ||
-    probabilityGap < 0.045
+    (confidence < (occludedWaterRead ? 0.44 : 0.5) &&
+      hNorm > (occludedWaterRead ? 0.84 : 0.78)) ||
+    best.p < (occludedWaterRead ? 0.25 : 0.28) ||
+    probabilityGap < (occludedWaterRead ? 0.035 : 0.045)
   ) {
     return { stroke: "Unknown", confidence: clamp(best.p + 0.12, 0.28, 0.52) };
   }

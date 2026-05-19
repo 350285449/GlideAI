@@ -26,10 +26,19 @@ export interface DrillSpec {
   purpose: string;
 }
 
+export type ScoreLevel = 0 | 1 | 2 | 3 | 4 | 5;
+
 export interface ScoreCriterion {
-  score: 1 | 2 | 3 | 4 | 5;
+  score: ScoreLevel;
   label: string;
   description: string;
+}
+
+export interface ManualScoreEstimate extends ScoreCriterion {
+  level: ScoreLevel;
+  levelPercent: number;
+  rawScore: number;
+  display: string;
 }
 
 interface StrokeKnowledgeBase {
@@ -63,7 +72,10 @@ export interface ManualCoachSet {
 export interface RubricRating {
   skill: string;
   weight: number;
-  score: ScoreCriterion["score"];
+  score: ScoreLevel;
+  level: ScoreLevel;
+  levelPercent: number;
+  rawScore: number;
   cue: string;
   reason: string;
 }
@@ -74,7 +86,7 @@ export interface ManualCoachResult {
   stroke: ManualStroke;
   strokeLabel: string;
   phase: ManualPhase;
-  estimatedScore: ScoreCriterion;
+  estimatedScore: ManualScoreEstimate;
   confidence: number;
   liveCue: string;
   primaryFocus: string;
@@ -112,14 +124,19 @@ export interface ManualAgentSource {
 
 const SCORING: ScoreCriterion[] = [
   {
+    score: 0,
+    label: "Unreadable",
+    description: "Insufficient reliable stroke evidence; fix camera, light, or body position first.",
+  },
+  {
     score: 1,
     label: "Needs Work",
     description: "Inconsistent technique, significant drag, frequent stalling.",
   },
   {
     score: 2,
-    label: "Progressing",
-    description: "Form is recognizable but requires high conscious effort.",
+    label: "Mediocre",
+    description: "Form is recognizable, but timing, body line, or propulsion still breaks under normal effort.",
   },
   {
     score: 3,
@@ -578,7 +595,7 @@ function buildManualAgentChunks(kb: StrokeKnowledgeBase): ManualAgentChunk[] {
       source: `${kb.identifier}:SCORE-${score.score}`,
       stroke: kb.stroke,
       kind: "score",
-      title: `${score.score}/5 ${score.label}`,
+      title: `Level ${score.score} ${score.label}`,
       text: `${score.label}. ${score.description}`,
       tags: [score.label.toLowerCase(), "score", String(score.score)],
     });
@@ -734,8 +751,48 @@ function findCorrection(kb: StrokeKnowledgeBase, tag: string): FlawCorrection {
   return kb.flawCorrections.find((item) => item.tags.includes(tag)) ?? kb.flawCorrections[0];
 }
 
-function findScore(kb: StrokeKnowledgeBase, score: ScoreCriterion["score"]): ScoreCriterion {
-  return kb.scoring.find((item) => item.score === score) ?? kb.scoring[0];
+function findScore(kb: StrokeKnowledgeBase, score: ScoreLevel): ScoreCriterion {
+  return kb.scoring.find((item) => item.score === score) ?? kb.scoring[0] ?? SCORING[0]!;
+}
+
+function clampNumber(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value));
+}
+
+function roundScore(value: number): number {
+  return Math.round(value * 100) / 100;
+}
+
+function scoreProgress(rawScore: number): {
+  level: ScoreLevel;
+  levelPercent: number;
+  rawScore: number;
+} {
+  const bounded = clampNumber(rawScore, 0, 5);
+  if (bounded >= 5) {
+    return { level: 5, levelPercent: 100, rawScore: 5 };
+  }
+
+  const level = Math.floor(bounded) as ScoreLevel;
+  return {
+    level,
+    levelPercent: Math.round((bounded - level) * 100),
+    rawScore: roundScore(bounded),
+  };
+}
+
+function scoreEstimate(kb: StrokeKnowledgeBase, rawScore: number): ManualScoreEstimate {
+  const progress = scoreProgress(rawScore);
+  const criterion = findScore(kb, progress.level);
+
+  return {
+    ...criterion,
+    score: progress.level,
+    level: progress.level,
+    levelPercent: progress.levelPercent,
+    rawScore: progress.rawScore,
+    display: `Level ${progress.level} - ${progress.levelPercent}%`,
+  };
 }
 
 function estimatePhase(input: ManualCoachInput, kb: StrokeKnowledgeBase): ManualPhase {
@@ -762,19 +819,21 @@ function estimatePhase(input: ManualCoachInput, kb: StrokeKnowledgeBase): Manual
 }
 
 function numericStyleScore(input: ManualCoachInput): number {
-  return (
-    1.1 +
-    input.trackingQuality * 1.35 +
-    input.confidence * 0.95 +
-    (input.completeArmChain ? 0.65 : -0.2) +
-    (input.anyEvf ? 0.65 : 0) +
-    input.bestEvfConfidence * 0.4 +
-    (input.lockState === "locked" ? 0.5 : 0) +
-    (input.lockState === "holding" ? -0.2 : 0) +
-    (input.lockState === "switching" ? -0.35 : 0) +
-    (input.lockState === "acquiring" ? -0.55 : 0) +
-    (input.catchPhaseActive && !input.anyEvf ? -0.45 : 0) +
-    (input.edgeLandmarks > 1 ? -0.5 : input.edgeLandmarks > 0 ? -0.2 : 0)
+  return clampNumber(
+    0.35 +
+      input.trackingQuality * 1.2 +
+      input.confidence * 1.05 +
+      (input.completeArmChain ? 0.75 : -0.25) +
+      (input.anyEvf ? 0.7 : 0) +
+      input.bestEvfConfidence * 0.55 +
+      (input.lockState === "locked" ? 0.55 : 0) +
+      (input.lockState === "holding" ? -0.12 : 0) +
+      (input.lockState === "switching" ? -0.28 : 0) +
+      (input.lockState === "acquiring" ? -0.5 : 0) +
+      (input.catchPhaseActive && !input.anyEvf ? -0.5 : 0) +
+      (input.edgeLandmarks > 1 ? -0.55 : input.edgeLandmarks > 0 ? -0.24 : 0),
+    0,
+    5
   );
 }
 
@@ -795,15 +854,39 @@ function styleReadReliability(input: ManualCoachInput): number {
   );
 }
 
-function estimateScore(input: ManualCoachInput, kb: StrokeKnowledgeBase): ScoreCriterion {
+function weightedRubricRawScore(rubric: RubricRating[]): number {
+  const totalWeight = rubric.reduce((total, item) => total + item.weight, 0);
+  if (totalWeight <= 0) return 0;
+
+  return rubric.reduce(
+    (total, item) => total + item.rawScore * item.weight,
+    0
+  ) / totalWeight;
+}
+
+function reliabilityScoreCap(reliability: number): number {
+  if (reliability < 0.28) return 0.95;
+  if (reliability < 0.45) return 1.95;
+  if (reliability < 0.6) return 2.95;
+  if (reliability < 0.72) return 3.95;
+  return 5;
+}
+
+function estimateScore(
+  input: ManualCoachInput,
+  kb: StrokeKnowledgeBase,
+  rubric: RubricRating[]
+): ManualScoreEstimate {
   const reliability = styleReadReliability(input);
-  const baseScore = Math.max(1, Math.min(5, Math.round(numericStyleScore(input))));
-  const reliabilityCap =
-    reliability < 0.45 ? 2 : reliability < 0.6 ? 3 : reliability < 0.72 ? 4 : 5;
-  return findScore(
-    kb,
-    Math.min(baseScore, reliabilityCap) as ScoreCriterion["score"]
+  const rubricScore = weightedRubricRawScore(rubric);
+  const evidenceScore = numericStyleScore(input);
+  const rawScore = clampNumber(
+    rubricScore * 0.76 + evidenceScore * 0.24,
+    0,
+    reliabilityScoreCap(reliability)
   );
+
+  return scoreEstimate(kb, rawScore);
 }
 
 function hasFeedback(input: ManualCoachInput, id: string): boolean {
@@ -829,27 +912,28 @@ function rateRubricSkill(
   input: ManualCoachInput,
   skill: string,
   kb: StrokeKnowledgeBase
-): Pick<RubricRating, "score" | "reason"> {
+): Pick<RubricRating, "score" | "level" | "levelPercent" | "rawScore" | "reason"> {
   const lower = skill.toLowerCase();
   let value = numericStyleScore(input);
   let reason = "General style evidence from pose quality, stroke lock, and arm-chain visibility.";
 
   if (lower.includes("kick") || lower.includes("leg") || lower.includes("knee")) {
     value =
-      1 +
-      input.trackingQuality * 2.35 +
+      0.25 +
+      input.trackingQuality * 2.45 +
       input.confidence * 0.55 +
-      (input.lockState === "locked" ? 0.55 : 0) +
-      (kb.stroke === "Breaststroke" ? 0.25 : 0.1) -
-      (input.edgeLandmarks > 0 ? 0.35 : 0);
+      (input.lockState === "locked" ? 0.65 : 0) +
+      (kb.stroke === "Breaststroke" ? 0.35 : 0.15) -
+      (input.edgeLandmarks > 0 ? 0.45 : 0);
     reason =
       "Kick is inferred from body stability and stroke type because lower-body landmarks are often partially submerged.";
   } else if (lower.includes("body") || lower.includes("extension")) {
     value =
-      1 +
-      input.trackingQuality * 3.15 +
-      input.confidence * 0.35 +
-      (input.edgeLandmarks === 0 ? 0.65 : -0.7);
+      0.2 +
+      input.trackingQuality * 3.3 +
+      input.confidence * 0.45 +
+      (input.edgeLandmarks === 0 ? 0.8 : -0.8) +
+      (input.lockState === "locked" ? 0.25 : 0);
     reason =
       input.edgeLandmarks > 0
         ? "Body line is hard to trust because landmarks are near the frame edge."
@@ -862,54 +946,60 @@ function rateRubricSkill(
     lower.includes("recovery")
   ) {
     value =
-      1 +
-      input.confidence * 1.25 +
-      (input.completeArmChain ? 1.15 : 0) +
-      (input.anyEvf ? 1.15 : 0) +
-      input.bestEvfConfidence * 0.65 +
-      (input.lockState === "locked" ? 0.4 : 0);
+      0.25 +
+      input.confidence * 1.1 +
+      (input.completeArmChain ? 1.2 : 0) +
+      (input.anyEvf ? 1.3 : 0) +
+      input.bestEvfConfidence * 0.85 +
+      (input.lockState === "locked" ? 0.55 : 0) +
+      (input.catchPhaseActive && !input.anyEvf ? -0.55 : 0);
     reason = input.anyEvf
       ? "Arm chain and EVF/catch evidence support a stronger arm-drive rating."
       : "Arm rating is limited because catch pressure or full arm chain is not consistent.";
   } else if (lower.includes("entry") || lower.includes("path") || lower.includes("angle")) {
     value =
-      1 +
-      input.trackingQuality * 0.8 +
-      input.confidence * 1.2 +
-      (input.completeArmChain ? 0.9 : 0) +
-      (hasFeedback(input, "left-cross") || hasFeedback(input, "right-cross") ? -0.45 : 0.85) +
-      (input.lockState === "locked" ? 0.35 : 0);
+      0.25 +
+      input.trackingQuality * 0.95 +
+      input.confidence * 1.25 +
+      (input.completeArmChain ? 1 : 0) +
+      (hasFeedback(input, "left-cross") || hasFeedback(input, "right-cross") ? -0.55 : 0.95) +
+      (input.lockState === "locked" ? 0.45 : 0);
     reason = "Entry/path rating combines arm-chain visibility, style lock, and centerline feedback.";
   } else if (lower.includes("roll") || lower.includes("rotation")) {
     value =
-      1 +
-      input.trackingQuality * 1.6 +
-      input.confidence * 0.65 +
-      (input.shoulderSlopeDegrees > 8 && input.shoulderSlopeDegrees < 32 ? 1.2 : 0.4) +
-      (input.shoulderView === "side" || input.shoulderView === "top-side" ? 0.5 : 0) +
-      (input.lockState === "locked" ? 0.3 : 0);
+      0.25 +
+      input.trackingQuality * 1.65 +
+      input.confidence * 0.7 +
+      (input.shoulderSlopeDegrees > 8 && input.shoulderSlopeDegrees < 32 ? 1.25 : 0.35) +
+      (input.shoulderView === "side" || input.shoulderView === "top-side" ? 0.6 : 0) +
+      (input.lockState === "locked" ? 0.4 : 0);
     reason = "Rotation is inferred from shoulder view and shoulder-line behavior.";
   } else if (lower.includes("breath")) {
     value =
-      1 +
-      input.trackingQuality * 1.7 +
-      input.confidence * 0.7 +
-      (hasFeedback(input, "shoulder-tilt") ? -0.45 : 0.55) +
-      (input.edgeLandmarks === 0 ? 0.35 : 0) +
-      (input.lockState === "locked" ? 0.35 : 0);
+      0.25 +
+      input.trackingQuality * 1.75 +
+      input.confidence * 0.75 +
+      (hasFeedback(input, "shoulder-tilt") ? -0.55 : 0.65) +
+      (input.edgeLandmarks === 0 ? 0.45 : 0) +
+      (input.lockState === "locked" ? 0.45 : 0);
     reason = "Breathing is inferred from head/shoulder stability and whether body line stays readable.";
   } else if (lower.includes("timing") || lower.includes("sequence")) {
     value =
-      1 +
-      input.confidence * 2.1 +
-      input.trackingQuality * 0.75 +
-      (input.lockState === "locked" ? 1 : 0) +
-      (input.lockState === "acquiring" ? -0.2 : 0);
+      0.25 +
+      input.confidence * 2.2 +
+      input.trackingQuality * 0.85 +
+      (input.lockState === "locked" ? 1.05 : 0) +
+      (input.lockState === "acquiring" ? -0.35 : 0);
     reason = "Timing is inferred from style lock stability and repeated stroke evidence.";
   }
 
+  const progress = scoreProgress(value);
+
   return {
-    score: Math.max(1, Math.min(5, Math.round(value))) as ScoreCriterion["score"],
+    score: progress.level,
+    level: progress.level,
+    levelPercent: progress.levelPercent,
+    rawScore: progress.rawScore,
     reason,
   };
 }
@@ -1285,8 +1375,8 @@ export function evaluatePhoneSwimAgent(input: ManualCoachInput): ManualCoachResu
   const kb = selectKnowledgeBase(input);
   const context = retrievePhoneAgentChunks(input, kb);
   const phase = estimatePhase(input, kb);
-  const estimatedScore = estimateScore(input, kb);
   const rubric = buildRubric(input, phase, kb);
+  const estimatedScore = estimateScore(input, kb, rubric);
   const comments = buildComments(input, kb, context).slice(0, 1);
   const first = firstActionableComment(comments);
   const nextSet = buildNextSet(input, kb, phase, first);
