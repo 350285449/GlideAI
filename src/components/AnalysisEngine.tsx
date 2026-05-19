@@ -2083,6 +2083,26 @@ function summarizeMotion(track: MotionTrack): ArmMotion {
   };
 }
 
+function summarizeWaterAwareArmMotion(
+  wristTrack: MotionTrack,
+  elbowTrack: MotionTrack
+): ArmMotion {
+  const wrist = summarizeMotion(wristTrack);
+  const elbow = summarizeMotion(elbowTrack);
+  const wristTravel = wrist.rangeX + wrist.rangeY;
+  const elbowTravel = elbow.rangeX + elbow.rangeY;
+
+  if (elbow.samples < 8 || elbowTravel <= wristTravel * 0.45) {
+    return wrist;
+  }
+
+  return {
+    samples: Math.max(wrist.samples, elbow.samples),
+    rangeX: Math.max(wrist.rangeX, elbow.rangeX * 0.92),
+    rangeY: Math.max(wrist.rangeY, elbow.rangeY * 0.92),
+  };
+}
+
 function pushMotionPoint(track: MotionTrack, landmark: NormalizedLandmark | undefined) {
   if (!isVisible(landmark, LANDMARK_PARTIAL_VISIBILITY)) return;
 
@@ -2102,8 +2122,8 @@ function updateMotionHistory(
   pushMotionPoint(history.rightElbow, landmarks[14]);
 
   return {
-    left: summarizeMotion(history.leftWrist),
-    right: summarizeMotion(history.rightWrist),
+    left: summarizeWaterAwareArmMotion(history.leftWrist, history.leftElbow),
+    right: summarizeWaterAwareArmMotion(history.rightWrist, history.rightElbow),
   };
 }
 
@@ -2136,6 +2156,10 @@ function normalizeStyleSample(
       (chain.wrist || chain.shoulder) &&
       chain.score >= MIN_ARM_SIGNAL_SCORE * 0.62
   );
+  const submergedViewReadable =
+    partialArmReadable &&
+    shoulders.visible &&
+    (isTopLikeView(shoulders.view) || shoulders.view === "front");
   const armCoverage = clamp(
     Math.max(tracking.leftArm.score, tracking.rightArm.score) / 2.1,
     0,
@@ -2146,7 +2170,8 @@ function normalizeStyleSample(
     tracking.quality * 0.58 +
       armCoverage * 0.2 +
       shoulderFactor * 0.1 +
-      (partialArmReadable ? 0.12 : 0),
+      (partialArmReadable ? 0.12 : 0) +
+      (submergedViewReadable ? 0.12 : 0),
     0,
     1
   );
@@ -2155,8 +2180,8 @@ function normalizeStyleSample(
     result.stroke !== "Unknown" &&
     partialArmReadable &&
     shoulders.visible &&
-    tracking.quality >= 0.3 &&
-    normalizedConfidence >= 0.24;
+    tracking.quality >= (submergedViewReadable ? 0.24 : 0.3) &&
+    normalizedConfidence >= (submergedViewReadable ? 0.18 : 0.24);
   const isReliable =
     submergedReadable ||
     (tracking.quality >= MIN_STYLE_SAMPLE_QUALITY &&

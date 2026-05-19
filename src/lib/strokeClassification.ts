@@ -208,6 +208,33 @@ function range(values: number[]): number {
   return Math.max(...values) - Math.min(...values);
 }
 
+function trackMotion(track: MotionTrackInput): ArmMotionInput {
+  return {
+    samples: track.points.length,
+    rangeX: range(track.points.map((point) => point.x)),
+    rangeY: range(track.points.map((point) => point.y)),
+  };
+}
+
+function waterAwareArmMotion(
+  wristMotion: ArmMotionInput,
+  elbowTrack: MotionTrackInput
+): ArmMotionInput {
+  const elbowMotion = trackMotion(elbowTrack);
+  const wristTravel = wristMotion.rangeX + wristMotion.rangeY;
+  const elbowTravel = elbowMotion.rangeX + elbowMotion.rangeY;
+
+  if (elbowMotion.samples < 8 || elbowTravel <= wristTravel * 0.45) {
+    return wristMotion;
+  }
+
+  return {
+    samples: Math.max(wristMotion.samples, elbowMotion.samples),
+    rangeX: Math.max(wristMotion.rangeX, elbowMotion.rangeX * 0.92),
+    rangeY: Math.max(wristMotion.rangeY, elbowMotion.rangeY * 0.92),
+  };
+}
+
 function dominantAxis(motion: MotionSummaryInput): "x" | "y" {
   const lx = motion.left.rangeX + motion.right.rangeX;
   const ly = motion.left.rangeY + motion.right.rangeY;
@@ -300,6 +327,35 @@ function dualAxisCorrelationBlend(left: MotionTrackInput, right: MotionTrackInpu
   else rhoBlend = rhoPos ?? rhoVel ?? 0;
 
   return { rhoPos, rhoVel, rhoBlend, wx, wy };
+}
+
+function mirroredPairSync(
+  left: MotionTrackInput,
+  right: MotionTrackInput,
+  shoulders: ShoulderInput
+): number {
+  const n = Math.min(left.points.length, right.points.length);
+  if (n < MIN_ALIGNED) return 0.5;
+
+  const lo = left.points.slice(-n);
+  const ro = right.points.slice(-n);
+  const lx = lo.map((point) => point.x - shoulders.centerX);
+  const rx = ro.map((point) => shoulders.centerX - point.x);
+  const ly = lo.map((point) => point.y);
+  const ry = ro.map((point) => point.y);
+  const xRange = range(lx) + range(rx);
+  const yRange = range(ly) + range(ry);
+  const weightSum = xRange + yRange + 1e-8;
+  const xSync = pearson(lx, rx);
+  const ySync = pearson(ly, ry);
+
+  if (xSync === null && ySync === null) return 0.5;
+
+  const blended =
+    (xSync ?? ySync ?? 0) * (xRange / weightSum) +
+    (ySync ?? xSync ?? 0) * (yRange / weightSum);
+
+  return clamp((blended + 1) / 2, 0, 1);
 }
 
 /** Fraction of frames where wrist velocities oppose — high ⇒ alternating strokes. */
@@ -406,6 +462,39 @@ function geometrySnapshot(
     breastSweep = clamp(symPair * 0.4 + clamp((elbowHop - 0.92) / 1.05, 0, 1) * 0.55, 0, 1);
     if (!bothBelowMid) breastSweep *= 0.72;
     if (!bothAboveMid) flyRecovery *= 0.88;
+  } else if (landmarkVisible(le) && landmarkVisible(re)) {
+    const elbowDy = Math.abs(le.y - re.y);
+    const elbowDx = Math.abs(le.x - re.x);
+
+    symPair = clamp(
+      1 - (elbowDy + elbowDx * 0.32) / (shoulderWidth * 2.5),
+      0,
+      0.72
+    );
+
+    const la = le.y < shoulders.centerY;
+    const ra = re.y < shoulders.centerY;
+    bothAboveMid = la && ra;
+    bothBelowMid = !la && !ra;
+
+    const elbowSpread = elbowDx / shoulderWidth;
+    const elbowHi = clamp(
+      (shoulders.centerY - Math.min(le.y, re.y)) / (shoulderWidth * 1.65),
+      0,
+      1
+    );
+
+    flyRecovery = clamp(
+      (symPair * 0.5 + elbowHi * 0.32) * (bothAboveMid ? 1 : 0.62),
+      0,
+      0.56
+    );
+    breastSweep = clamp(
+      symPair * 0.34 + clamp((elbowSpread - 0.72) / 1.15, 0, 1) * 0.42,
+      0,
+      0.66
+    );
+    if (!bothBelowMid) breastSweep *= 0.68;
   }
 
   return { flyRecovery, breastSweep, symPair, bothBelowMid, bothAboveMid };
@@ -592,8 +681,12 @@ export function classifySwimStroke(
     return { stroke: "Unknown", confidence: 0 };
   }
 
-  const leftTravel = motion.left.rangeX + motion.left.rangeY;
-  const rightTravel = motion.right.rangeX + motion.right.rangeY;
+  const waterMotion: MotionSummaryInput = {
+    left: waterAwareArmMotion(motion.left, motionHistory.leftElbow),
+    right: waterAwareArmMotion(motion.right, motionHistory.rightElbow),
+  };
+  const leftTravel = waterMotion.left.rangeX + waterMotion.left.rangeY;
+  const rightTravel = waterMotion.right.rangeX + waterMotion.right.rangeY;
   const bilateralTravel = leftTravel + rightTravel;
   const pairedHistoryX = alignedAxisSeries(
     motionHistory.leftWrist,
@@ -615,10 +708,12 @@ export function classifySwimStroke(
     motionHistory.rightElbow,
     "y"
   );
+  const hasPairedWristHistory = Boolean(pairedHistoryX || pairedHistoryY);
+  const hasPairedElbowHistory = Boolean(pairedElbowHistoryX || pairedElbowHistoryY);
   const hasPairedWaterHistory =
-    Boolean(pairedHistoryX || pairedHistoryY) &&
+    (hasPairedWristHistory || hasPairedElbowHistory) &&
     (ctx.bothArmsChainVisible ||
-      Boolean(pairedElbowHistoryX || pairedElbowHistoryY) ||
+      hasPairedElbowHistory ||
       partialArmCount > 0);
 
   if (!primaryArm && partialArmCount === 0) {
@@ -632,7 +727,7 @@ export function classifySwimStroke(
 
   if (view === "side" || (!ctx.bothArmsChainVisible && !hasPairedWaterHistory)) {
     const sideArm = primaryArm ?? "left";
-    const pm = motion[sideArm === "left" ? "left" : "right"];
+    const pm = waterMotion[sideArm === "left" ? "left" : "right"];
     const samplesOk = pm.samples >= 10;
     const sideMotionThreshold = scaleByShoulder(0.052, shoulders, 0.26);
     const sideTravelThreshold = scaleByShoulder(0.1, shoulders, 0.28);
@@ -701,7 +796,7 @@ export function classifySwimStroke(
     };
   }
 
-  const axis = dominantAxis(motion);
+  const axis = dominantAxis(waterMotion);
   let paired =
     axis === "x"
       ? pairedHistoryX
@@ -709,8 +804,23 @@ export function classifySwimStroke(
   if (!paired) {
     paired = axis === "x" ? pairedHistoryY : pairedHistoryX;
   }
+  const wristPairSelected = paired !== null;
+  if (!paired) {
+    paired = axis === "x" ? pairedElbowHistoryX : pairedElbowHistoryY;
+  }
+  if (!paired) {
+    paired = axis === "x" ? pairedElbowHistoryY : pairedElbowHistoryX;
+  }
 
-  const corr = dualAxisCorrelationBlend(motionHistory.leftWrist, motionHistory.rightWrist);
+  const useElbowPair = !wristPairSelected && paired !== null;
+  const pairLeftTrack = useElbowPair
+    ? motionHistory.leftElbow
+    : motionHistory.leftWrist;
+  const pairRightTrack = useElbowPair
+    ? motionHistory.rightElbow
+    : motionHistory.rightWrist;
+
+  const corr = dualAxisCorrelationBlend(pairLeftTrack, pairRightTrack);
   let rhoBlend = corr.rhoBlend;
 
   const dyn = elbowWristSeparationDynamics(
@@ -721,31 +831,42 @@ export function classifySwimStroke(
   );
 
   let opposition = 0.5;
-  const px = alignedAxisSeries(motionHistory.leftWrist, motionHistory.rightWrist, "x");
-  const py = alignedAxisSeries(motionHistory.leftWrist, motionHistory.rightWrist, "y");
+  const px = alignedAxisSeries(pairLeftTrack, pairRightTrack, "x");
+  const py = alignedAxisSeries(pairLeftTrack, pairRightTrack, "y");
   if (px && py) {
     const ox = velocityOppositionRate(px.a, px.b);
     const oy = velocityOppositionRate(py.a, py.b);
     opposition = ox * corr.wx + oy * corr.wy;
   }
 
-  const altDrive = clamp((opposition - 0.42) / 0.38, 0, 1);
+  const geo = geometrySnapshot(lm, shoulders);
+  const mirroredSync = mirroredPairSync(pairLeftTrack, pairRightTrack, shoulders);
+  const symmetricViewCue =
+    (view === "top" || view === "top-side" || view === "front") &&
+    geo.symPair > 0.52 &&
+    mirroredSync > 0.62;
+  let altDrive = clamp((opposition - 0.42) / 0.38, 0, 1);
+  if (symmetricViewCue) {
+    altDrive *= 1 - clamp((mirroredSync - 0.62) / 0.33, 0, 1) * 0.62;
+  }
   /** Pull rho toward alternating when wrists oppose often — fixes noisy Pearson at cycle boundaries. */
   rhoBlend = rhoBlend * (1 - altDrive * 0.38) - altDrive * 0.22;
 
-  const syncCue = clamp((rhoBlend + 1) / 2, 0, 1);
+  const rawSyncCue = clamp((rhoBlend + 1) / 2, 0, 1);
+  const syncCue = symmetricViewCue
+    ? Math.max(rawSyncCue, mirroredSync * 0.82)
+    : rawSyncCue;
   const spread = dualAxisSpread(
-    motionHistory.leftWrist,
-    motionHistory.rightWrist,
+    pairLeftTrack,
+    pairRightTrack,
     shoulderNorm(shoulders)
   );
 
-  const geo = geometrySnapshot(lm, shoulders);
   const lower = lowerBodySnapshot(lm, shoulders);
 
   const hasSolidMotion =
-    motion.left.samples >= 12 &&
-    motion.right.samples >= 12 &&
+    waterMotion.left.samples >= 12 &&
+    waterMotion.right.samples >= 12 &&
     leftTravel > scaleByShoulder(0.032, shoulders, 0.3) &&
     rightTravel > scaleByShoulder(0.032, shoulders, 0.3) &&
     bilateralTravel > scaleByShoulder(0.085, shoulders, 0.3);
@@ -917,6 +1038,7 @@ export function classifySwimStroke(
   const second = order[1]!;
   const probabilityGap = best.p - second.p;
   const occludedWaterRead = !ctx.bothArmsChainVisible && hasPairedWaterHistory;
+  const elbowOnlyWaterRead = occludedWaterRead && useElbowPair;
 
   let confidence = clamp((best.p - second.p) / Math.max(best.p, 0.075), 0.34, 0.93);
 
@@ -935,12 +1057,15 @@ export function classifySwimStroke(
   if (occludedWaterRead) {
     confidence *= 0.9;
   }
+  if (elbowOnlyWaterRead) {
+    confidence *= 0.92;
+  }
 
   if (
-    (confidence < (occludedWaterRead ? 0.44 : 0.5) &&
-      hNorm > (occludedWaterRead ? 0.84 : 0.78)) ||
-    best.p < (occludedWaterRead ? 0.25 : 0.28) ||
-    probabilityGap < (occludedWaterRead ? 0.035 : 0.045)
+    (confidence < (occludedWaterRead ? 0.42 : 0.5) &&
+      hNorm > (occludedWaterRead ? 0.86 : 0.78)) ||
+    best.p < (occludedWaterRead ? 0.23 : 0.28) ||
+    probabilityGap < (occludedWaterRead ? 0.03 : 0.045)
   ) {
     return { stroke: "Unknown", confidence: clamp(best.p + 0.12, 0.28, 0.52) };
   }
