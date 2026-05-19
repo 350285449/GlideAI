@@ -256,8 +256,6 @@ interface TrackingStatus {
   visibleLandmarks: number;
   reliableLandmarks: number;
   edgeLandmarks: number;
-  bestArmPixels: number;
-  detailReady: boolean;
   quality: number;
   fps: number;
   leftArm: ArmChainStatus;
@@ -334,28 +332,6 @@ interface LongRangeProcessingState {
   transform: PoseInputTransform;
   scanIndex: number;
 }
-
-interface LightingStatus {
-  lowLight: boolean;
-  severe: boolean;
-  luminance: number;
-  enhancement: number;
-  cameraBoosted: boolean;
-}
-
-interface LowLightProcessingState extends LightingStatus {
-  sampleCanvas: HTMLCanvasElement | null;
-  lastSampleAt: number;
-  cameraBoostAttempted: boolean;
-}
-
-type ImagingTrackCapabilities = MediaTrackCapabilities & {
-  brightness?: MediaSettingsRange;
-  exposureCompensation?: MediaSettingsRange;
-  exposureMode?: string[];
-  focusMode?: string[];
-  whiteBalanceMode?: string[];
-};
 
 type PoseConnection = readonly [number, number];
 type LandmarkTrackingMemory = Array<LandmarkTrack | null>;
@@ -469,7 +445,6 @@ const ACTIVE_ARM_SWITCH_SCORE_MARGIN = 1.25;
 const ARM_SEGMENT_MIN = 0.0032;
 const LONG_RANGE_BODY_MIN = 0.012;
 const ARM_LENGTH_QUALITY_REFERENCE = 0.022;
-const MIN_TRUSTED_ARM_DETAIL_PIXELS = 26;
 const FOREARM_SEGMENT_MAX = 0.58;
 const UPPER_ARM_SEGMENT_MAX = 0.52;
 const ARM_RATIO_MIN = 0.25;
@@ -494,9 +469,9 @@ const FULL_POSE_INPUT_TRANSFORM: PoseInputTransform = Object.freeze({
 });
 const LONG_RANGE_INPUT_MAX_WIDTH = 1920;
 const LONG_RANGE_INPUT_MAX_HEIGHT = 1080;
-const LONG_RANGE_CAMERA_WIDTH = 3840;
-const LONG_RANGE_CAMERA_HEIGHT = 2160;
-const LONG_RANGE_FULL_SCAN_EVERY = 18;
+const LONG_RANGE_FULL_SCAN_EVERY = 12;
+const LONG_RANGE_SCAN_CROP_SIZE = 0.28;
+const LONG_RANGE_CENTER_SCAN_CROP_SIZE = 0.48;
 const LONG_RANGE_MIN_LOCK_CROP = 0.09;
 const LONG_RANGE_MAX_LOCK_CROP = 0.62;
 const LONG_RANGE_LOCK_PADDING = 3.6;
@@ -504,39 +479,6 @@ const LONG_RANGE_TRACK_BLEND = 0.46;
 const LONG_RANGE_REACQUIRE_HOLD_FRAMES = 90;
 const LONG_RANGE_SCAN_BURST_SIZE = 6;
 const LONG_RANGE_REACQUIRE_SCAN_AFTER_FRAMES = 8;
-const LONG_RANGE_SCAN_TARGETS: readonly (Point & { size: number })[] = [
-  { x: 0.5, y: 0.5, size: 0.48 },
-  { x: 0.5, y: 0.5, size: 0.28 },
-  { x: 0.5, y: 0.35, size: 0.28 },
-  { x: 0.5, y: 0.65, size: 0.28 },
-  { x: 0.25, y: 0.5, size: 0.28 },
-  { x: 0.75, y: 0.5, size: 0.28 },
-  { x: 0.35, y: 0.35, size: 0.28 },
-  { x: 0.65, y: 0.35, size: 0.28 },
-  { x: 0.35, y: 0.65, size: 0.28 },
-  { x: 0.65, y: 0.65, size: 0.28 },
-  { x: 0.5, y: 0.25, size: 0.2 },
-  { x: 0.5, y: 0.75, size: 0.2 },
-  { x: 0.25, y: 0.25, size: 0.2 },
-  { x: 0.75, y: 0.25, size: 0.2 },
-  { x: 0.25, y: 0.75, size: 0.2 },
-  { x: 0.75, y: 0.75, size: 0.2 },
-  { x: 0.5, y: 0.5, size: 0.16 },
-  { x: 0.5, y: 0.35, size: 0.16 },
-  { x: 0.5, y: 0.65, size: 0.16 },
-  { x: 0.35, y: 0.5, size: 0.16 },
-  { x: 0.65, y: 0.5, size: 0.16 },
-];
-const LOW_LIGHT_SAMPLE_WIDTH = 64;
-const LOW_LIGHT_SAMPLE_HEIGHT = 36;
-const LOW_LIGHT_SAMPLE_INTERVAL_MS = 360;
-const LOW_LIGHT_ENTER_LUMINANCE = 0.27;
-const LOW_LIGHT_EXIT_LUMINANCE = 0.34;
-const LOW_LIGHT_SEVERE_LUMINANCE = 0.18;
-const LOW_LIGHT_TARGET_LUMINANCE = 0.42;
-const LOW_LIGHT_MAX_BRIGHTNESS = 1.9;
-const LOW_LIGHT_MAX_CONTRAST = 1.22;
-const LOW_LIGHT_MAX_SATURATION = 1.08;
 const MIN_CATCH_RANGE = 0.0025;
 const DEFAULT_TRACKER_SETTINGS: TrackerSettings = {
   predictionMode: "extended",
@@ -946,8 +888,8 @@ function cameraVideoConstraints(
   fallbackMode: CameraFallbackMode
 ): MediaTrackConstraints {
   const base: MediaTrackConstraints = {
-    width: { ideal: LONG_RANGE_CAMERA_WIDTH },
-    height: { ideal: LONG_RANGE_CAMERA_HEIGHT },
+    width: { ideal: 1920 },
+    height: { ideal: 1080 },
     frameRate: { ideal: 30 },
   };
 
@@ -971,25 +913,6 @@ function createLongRangeProcessingState(): LongRangeProcessingState {
     canvas: null,
     transform: FULL_POSE_INPUT_TRANSFORM,
     scanIndex: 0,
-  };
-}
-
-function createLightingStatus(): LightingStatus {
-  return {
-    lowLight: false,
-    severe: false,
-    luminance: 1,
-    enhancement: 0,
-    cameraBoosted: false,
-  };
-}
-
-function createLowLightProcessingState(): LowLightProcessingState {
-  return {
-    ...createLightingStatus(),
-    sampleCanvas: null,
-    lastSampleAt: 0,
-    cameraBoostAttempted: false,
   };
 }
 
@@ -1039,12 +962,32 @@ function longRangeScanTransform(state: LongRangeProcessingState): PoseInputTrans
     return FULL_POSE_INPUT_TRANSFORM;
   }
 
+  const centers: readonly Point[] = [
+    { x: 0.5, y: 0.5 },
+    { x: 0.5, y: 0.35 },
+    { x: 0.5, y: 0.65 },
+    { x: 0.25, y: 0.5 },
+    { x: 0.75, y: 0.5 },
+    { x: 0.35, y: 0.35 },
+    { x: 0.65, y: 0.35 },
+    { x: 0.35, y: 0.65 },
+    { x: 0.65, y: 0.65 },
+    { x: 0.5, y: 0.25 },
+    { x: 0.5, y: 0.75 },
+    { x: 0.25, y: 0.25 },
+    { x: 0.75, y: 0.25 },
+    { x: 0.25, y: 0.75 },
+    { x: 0.75, y: 0.75 },
+  ];
   const fullFrameScansBefore = Math.floor(scanStep / LONG_RANGE_FULL_SCAN_EVERY);
-  const targetIndex =
-    (scanStep - fullFrameScansBefore - 1) % LONG_RANGE_SCAN_TARGETS.length;
-  const target = LONG_RANGE_SCAN_TARGETS[targetIndex] ?? LONG_RANGE_SCAN_TARGETS[0];
+  const tileIndex = (scanStep - fullFrameScansBefore - 1) % centers.length;
+  const center = centers[tileIndex] ?? centers[0];
+  const size =
+    center.x === 0.5 && center.y === 0.5
+      ? LONG_RANGE_CENTER_SCAN_CROP_SIZE
+      : LONG_RANGE_SCAN_CROP_SIZE;
 
-  state.transform = cropAroundPoint(target.x, target.y, target.size);
+  state.transform = cropAroundPoint(center.x, center.y, size);
   return state.transform;
 }
 
@@ -1145,156 +1088,14 @@ function ensureLongRangeCanvas(
   return canvas;
 }
 
-function ensureLowLightSampleCanvas(state: LowLightProcessingState): HTMLCanvasElement {
-  const canvas = state.sampleCanvas ?? document.createElement("canvas");
-  if (
-    canvas.width !== LOW_LIGHT_SAMPLE_WIDTH ||
-    canvas.height !== LOW_LIGHT_SAMPLE_HEIGHT
-  ) {
-    canvas.width = LOW_LIGHT_SAMPLE_WIDTH;
-    canvas.height = LOW_LIGHT_SAMPLE_HEIGHT;
-  }
-
-  state.sampleCanvas = canvas;
-  return canvas;
-}
-
-function lowLightFilter(enhancement: number): string {
-  if (enhancement <= 0.01) return "none";
-
-  const brightness = mix(1, LOW_LIGHT_MAX_BRIGHTNESS, enhancement);
-  const contrast = mix(1, LOW_LIGHT_MAX_CONTRAST, enhancement);
-  const saturation = mix(1, LOW_LIGHT_MAX_SATURATION, enhancement);
-  return `brightness(${brightness.toFixed(2)}) contrast(${contrast.toFixed(2)}) saturate(${saturation.toFixed(2)})`;
-}
-
-function updateLowLightProcessing(
-  video: HTMLVideoElement,
-  state: LowLightProcessingState,
-  now: number
-): boolean {
-  if (
-    now - state.lastSampleAt < LOW_LIGHT_SAMPLE_INTERVAL_MS ||
-    video.videoWidth <= 0 ||
-    video.videoHeight <= 0
-  ) {
-    return false;
-  }
-
-  const hadPreviousSample = state.lastSampleAt > 0;
-  state.lastSampleAt = now;
-  const canvas = ensureLowLightSampleCanvas(state);
-  const ctx = canvas.getContext("2d", { willReadFrequently: true });
-  if (!ctx) return false;
-
-  ctx.filter = "none";
-  ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-  const pixels = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
-  let luminanceTotal = 0;
-
-  for (let index = 0; index < pixels.length; index += 4) {
-    const red = pixels[index] ?? 0;
-    const green = pixels[index + 1] ?? 0;
-    const blue = pixels[index + 2] ?? 0;
-    luminanceTotal += (red * 0.2126 + green * 0.7152 + blue * 0.0722) / 255;
-  }
-
-  const sampleCount = Math.max(1, pixels.length / 4);
-  const sampledLuminance = luminanceTotal / sampleCount;
-  const previousLowLight = state.lowLight;
-  const previousSevere = state.severe;
-  const previousEnhancement = state.enhancement;
-  state.luminance = hadPreviousSample
-    ? mix(state.luminance, sampledLuminance, 0.28)
-    : sampledLuminance;
-  state.lowLight = state.lowLight
-    ? state.luminance < LOW_LIGHT_EXIT_LUMINANCE
-    : state.luminance < LOW_LIGHT_ENTER_LUMINANCE;
-  state.severe = state.luminance < LOW_LIGHT_SEVERE_LUMINANCE;
-  state.enhancement = clamp(
-    (LOW_LIGHT_TARGET_LUMINANCE - state.luminance) /
-      Math.max(LOW_LIGHT_TARGET_LUMINANCE - LOW_LIGHT_SEVERE_LUMINANCE, 0.001),
-    0,
-    1
-  );
-
-  return (
-    previousLowLight !== state.lowLight ||
-    previousSevere !== state.severe ||
-    Math.abs(previousEnhancement - state.enhancement) >= 0.08
-  );
-}
-
-function supportedMode(
-  modes: string[] | undefined,
-  preferred: string
-): string | null {
-  return modes?.includes(preferred) ? preferred : null;
-}
-
-function boostedRangeValue(range: MediaSettingsRange | undefined): number | null {
-  const min = range?.min;
-  const max = range?.max;
-
-  if (!Number.isFinite(min) || !Number.isFinite(max)) {
-    return null;
-  }
-
-  if ((max as number) <= (min as number)) return null;
-  return (min as number) + ((max as number) - (min as number)) * 0.8;
-}
-
-async function applyBestEffortLowLightCameraBoost(
-  track: MediaStreamTrack | null,
-  state: LowLightProcessingState
-) {
-  if (!track || state.cameraBoostAttempted) return;
-  state.cameraBoostAttempted = true;
-
-  try {
-    const capabilities = track.getCapabilities() as ImagingTrackCapabilities;
-    const advanced: Record<string, unknown>[] = [];
-    const continuousExposure = supportedMode(capabilities.exposureMode, "continuous");
-    const continuousFocus = supportedMode(capabilities.focusMode, "continuous");
-    const continuousWhiteBalance = supportedMode(
-      capabilities.whiteBalanceMode,
-      "continuous"
-    );
-    const exposureCompensation = boostedRangeValue(capabilities.exposureCompensation);
-    const brightness = boostedRangeValue(capabilities.brightness);
-
-    if (continuousExposure) advanced.push({ exposureMode: continuousExposure });
-    if (continuousFocus) advanced.push({ focusMode: continuousFocus });
-    if (continuousWhiteBalance) {
-      advanced.push({ whiteBalanceMode: continuousWhiteBalance });
-    }
-    if (exposureCompensation !== null) {
-      advanced.push({ exposureCompensation });
-    }
-    if (brightness !== null) {
-      advanced.push({ brightness });
-    }
-
-    if (advanced.length === 0) return;
-
-    await track.applyConstraints({
-      advanced,
-    } as MediaTrackConstraints);
-    state.cameraBoosted = true;
-  } catch {
-    /* Some browsers expose no imaging controls or reject unsupported values. */
-  }
-}
-
 function renderLongRangePoseInput(
   video: HTMLVideoElement,
   state: LongRangeProcessingState,
-  transform: PoseInputTransform,
-  lowLight: LowLightProcessingState
+  transform: PoseInputTransform
 ): PoseFrameInput {
   state.transform = transform;
 
-  if (isFullPoseInputTransform(transform) && lowLight.enhancement <= 0.01) {
+  if (isFullPoseInputTransform(transform)) {
     return { image: video, transform };
   }
 
@@ -1304,25 +1105,15 @@ function renderLongRangePoseInput(
     return { image: video, transform: FULL_POSE_INPUT_TRANSFORM };
   }
 
-  const sx = isFullPoseInputTransform(transform)
-    ? 0
-    : Math.round(transform.x * video.videoWidth);
-  const sy = isFullPoseInputTransform(transform)
-    ? 0
-    : Math.round(transform.y * video.videoHeight);
-  const sw = isFullPoseInputTransform(transform)
-    ? video.videoWidth
-    : Math.max(1, Math.round(transform.width * video.videoWidth));
-  const sh = isFullPoseInputTransform(transform)
-    ? video.videoHeight
-    : Math.max(1, Math.round(transform.height * video.videoHeight));
+  const sx = Math.round(transform.x * video.videoWidth);
+  const sy = Math.round(transform.y * video.videoHeight);
+  const sw = Math.max(1, Math.round(transform.width * video.videoWidth));
+  const sh = Math.max(1, Math.round(transform.height * video.videoHeight));
 
   ctx.imageSmoothingEnabled = true;
   ctx.imageSmoothingQuality = "high";
   ctx.clearRect(0, 0, canvas.width, canvas.height);
-  ctx.filter = lowLightFilter(lowLight.enhancement);
   ctx.drawImage(video, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
-  ctx.filter = "none";
 
   return { image: canvas, transform };
 }
@@ -2173,71 +1964,12 @@ function getArmChainStatus(
   };
 }
 
-function landmarkPixelDistance(
-  a: NormalizedLandmark | undefined,
-  b: NormalizedLandmark | undefined,
-  videoWidth: number,
-  videoHeight: number
-): number {
-  if (
-    !a ||
-    !b ||
-    !isTrackableLandmark(a, LANDMARK_PARTIAL_VISIBILITY) ||
-    !isTrackableLandmark(b, LANDMARK_PARTIAL_VISIBILITY)
-  ) {
-    return 0;
-  }
-
-  return Math.hypot(
-    (a.x - b.x) * Math.max(videoWidth, 1),
-    (a.y - b.y) * Math.max(videoHeight, 1)
-  );
-}
-
-function bestArmDetailPixels(
-  landmarks: NormalizedLandmark[],
-  videoWidth: number,
-  videoHeight: number
-): number {
-  const left = armIndices("left");
-  const right = armIndices("right");
-
-  return Math.max(
-    landmarkPixelDistance(
-      landmarks[left.shoulder],
-      landmarks[left.elbow],
-      videoWidth,
-      videoHeight
-    ),
-    landmarkPixelDistance(
-      landmarks[left.elbow],
-      landmarks[left.wrist],
-      videoWidth,
-      videoHeight
-    ),
-    landmarkPixelDistance(
-      landmarks[right.shoulder],
-      landmarks[right.elbow],
-      videoWidth,
-      videoHeight
-    ),
-    landmarkPixelDistance(
-      landmarks[right.elbow],
-      landmarks[right.wrist],
-      videoWidth,
-      videoHeight
-    )
-  );
-}
-
 function createTrackingStatus(
   landmarks: NormalizedLandmark[],
   settings: TrackerSettings,
   state: TrackingState,
   predictionFrames: number,
   fps: number,
-  videoWidth = VIDEO_WIDTH,
-  videoHeight = VIDEO_HEIGHT,
   profile: SwimmerProfile = DEFAULT_SWIMMER_PROFILE
 ): TrackingStatus {
   const trackedIndices = Array.from(SWIM_LANDMARKS);
@@ -2256,24 +1988,18 @@ function createTrackingStatus(
   const bestArmScore = Math.max(leftArm.score, rightArm.score);
   const pairedArmScore = Math.min((leftArm.score + rightArm.score) / 3.2, 1);
   const completeArmBonus = leftArm.complete || rightArm.complete ? 0.08 : 0;
-  const bestArmPixels = bestArmDetailPixels(landmarks, videoWidth, videoHeight);
-  const detailFactor = Math.min(bestArmPixels / MIN_TRUSTED_ARM_DETAIL_PIXELS, 1);
-  const detailReady = bestArmPixels >= MIN_TRUSTED_ARM_DETAIL_PIXELS;
   const quality = clamp(
-    visibleLandmarks / trackedIndices.length * 0.24 +
-      reliableLandmarks / Math.max(trackedIndices.length, 1) * 0.28 +
-      Math.min(bestArmScore / 2.1, 1) * 0.24 +
-      pairedArmScore * 0.1 +
-      detailFactor * 0.14 +
+    visibleLandmarks / trackedIndices.length * 0.28 +
+      reliableLandmarks / Math.max(trackedIndices.length, 1) * 0.32 +
+      Math.min(bestArmScore / 2.1, 1) * 0.28 +
+      pairedArmScore * 0.12 +
       completeArmBonus -
       edgeLandmarks * 0.02,
     0,
     1
   );
   const limited =
-    state === "live" && (quality < 0.55 || edgeLandmarks >= 2 || !detailReady)
-      ? "limited"
-      : state;
+    state === "live" && (quality < 0.55 || edgeLandmarks >= 2) ? "limited" : state;
 
   return {
     state: limited,
@@ -2283,8 +2009,6 @@ function createTrackingStatus(
     visibleLandmarks,
     reliableLandmarks,
     edgeLandmarks,
-    bestArmPixels,
-    detailReady,
     quality,
     fps,
     leftArm,
@@ -2385,7 +2109,6 @@ function normalizeStyleSample(
   const normalizedConfidence = clamp(result.confidence * qualityFactor, 0, 1);
   const isReliable =
     tracking.quality >= MIN_STYLE_SAMPLE_QUALITY &&
-    tracking.detailReady &&
     normalizedConfidence >= MIN_STYLE_SAMPLE_CONFIDENCE &&
     (armComplete || tracking.quality >= 0.7) &&
     shoulders.visible;
@@ -3905,10 +3628,6 @@ function getPrimaryCue(
     return `Focus is set to ${strokeFocus}; auto-detect currently sees ${technique.rawStroke}.`;
   }
 
-  if (!tracking.detailReady) {
-    return "Use optical zoom or move the camera closer before trusting technique feedback.";
-  }
-
   if (tracking.quality < 0.45) {
     return "Improve lighting or keep one shoulder-elbow-wrist chain visible.";
   }
@@ -3935,11 +3654,10 @@ function suggestionToneClass(tone: SuggestionTone): string {
 function buildCoachSuggestions(
   analysis: FullAnalysis | null,
   trackerSettings: TrackerSettings,
-  strokeFocus: StrokeFocus,
-  lighting: LightingStatus
+  strokeFocus: StrokeFocus
 ): CoachSuggestion[] {
   if (!analysis) {
-    const startupSuggestions: CoachSuggestion[] = [
+    return [
       {
         id: "frame-setup",
         tone: "warning",
@@ -3956,19 +3674,6 @@ function buildCoachSuggestions(
             : `${cameraViewModeLabel(trackerSettings.viewMode)} view is fixed for this set.`,
       },
     ];
-
-    if (lighting.lowLight) {
-      startupSuggestions.unshift({
-        id: "lighting",
-        tone: lighting.severe ? "critical" : "warning",
-        title: "Lighting",
-        detail: lighting.severe
-          ? "Scene is very dark. Add pool-deck light or move toward a brighter lane; software boost has limits."
-          : "Low-light boost is active; more light will help the detector lock faster.",
-      });
-    }
-
-    return startupSuggestions;
   }
 
   const { technique, tracking, evf } = analysis;
@@ -3976,26 +3681,6 @@ function buildCoachSuggestions(
   const bestArm = tracking.leftArm.score >= tracking.rightArm.score
     ? tracking.leftArm
     : tracking.rightArm;
-
-  if (lighting.lowLight) {
-    suggestions.push({
-      id: "lighting",
-      tone: lighting.severe ? "critical" : "warning",
-      title: "Lighting",
-      detail: lighting.severe
-        ? "Scene is very dark. Add pool-deck light or move toward a brighter lane; software boost has limits."
-        : "Low-light boost is active; more light will make the read steadier.",
-    });
-  }
-
-  if (!tracking.detailReady) {
-    suggestions.push({
-      id: "detail",
-      tone: "critical",
-      title: "Subject detail",
-      detail: "The active arm is too small in-frame for trustworthy mechanics; use optical zoom or move closer.",
-    });
-  }
 
   if (tracking.quality < 0.45) {
     suggestions.push({
@@ -4319,7 +4004,6 @@ function MetricsPanel({
   onStrokeFocusChange,
   swimmerProfile,
   onSwimmerProfileChange,
-  lightingStatus,
   interfaceStyle,
   onInterfaceStyleChange,
   onSessionComplete,
@@ -4336,7 +4020,6 @@ function MetricsPanel({
   onStrokeFocusChange: (focus: StrokeFocus) => void;
   swimmerProfile: SwimmerProfile;
   onSwimmerProfileChange: (patch: Partial<SwimmerProfile>) => void;
-  lightingStatus: LightingStatus;
   interfaceStyle: InterfaceStyle;
   onInterfaceStyleChange: (style: InterfaceStyle) => void;
   onSessionComplete?: (sessionData: SessionCompleteData) => void;
@@ -4371,7 +4054,7 @@ function MetricsPanel({
   const coachCue = hasActionableManualCue ? manualCoach.liveCue || legacyCue : "";
   const coachSuggestions = buildPhoneAgentSuggestions(
     manualCoach,
-    buildCoachSuggestions(analysis, trackerSettings, strokeFocus, lightingStatus)
+    buildCoachSuggestions(analysis, trackerSettings, strokeFocus)
   );
   const voiceSupported =
     typeof window !== "undefined" &&
@@ -5263,7 +4946,7 @@ function MetricsPanel({
             style={{ width: `${qualityPercent}%` }}
           />
         </div>
-        <div className="mt-3 grid grid-cols-4 divide-x divide-zinc-800/80 text-center">
+        <div className="mt-3 grid grid-cols-3 divide-x divide-zinc-800/80 text-center">
           <div className="px-2">
             <p className="text-[10px] uppercase tracking-[0.14em] text-zinc-500">Quality</p>
             <p className="mt-1 font-mono text-sm text-zinc-100">{qualityPercent}%</p>
@@ -5275,46 +4958,12 @@ function MetricsPanel({
             </p>
           </div>
           <div className="px-2">
-            <p className="text-[10px] uppercase tracking-[0.14em] text-zinc-500">Detail</p>
-            <p className="mt-1 font-mono text-sm text-zinc-100">
-              {tracking ? Math.round(tracking.bestArmPixels) : "--"}px
-            </p>
-          </div>
-          <div className="px-2">
             <p className="text-[10px] uppercase tracking-[0.14em] text-zinc-500">Edge</p>
             <p className="mt-1 font-mono text-sm text-zinc-100">
               {tracking?.edgeLandmarks ?? 0}
             </p>
           </div>
         </div>
-      </div>
-
-      <div className={metricCardClass(lightingStatus.lowLight ? "amber" : "zinc")}>
-        <div className="mb-3 flex items-center gap-2">
-          <Lightbulb className="h-4 w-4 text-cyan-400" />
-          <span className="text-xs font-semibold uppercase tracking-[0.2em] text-zinc-500">
-            Lighting
-          </span>
-        </div>
-        <div className="flex items-end justify-between gap-3">
-          <p className="text-2xl font-mono font-bold tabular-nums text-zinc-200">
-            {Math.round(lightingStatus.luminance * 100)}%
-          </p>
-          <p className="text-xs text-cyan-300">
-            {lightingStatus.lowLight
-              ? lightingStatus.cameraBoosted
-                ? "Boost + camera"
-                : "Boost active"
-              : "Normal"}
-          </p>
-        </div>
-        <p className="mt-2 text-xs text-zinc-500">
-          {lightingStatus.severe
-            ? "Very dark scene; add real light for dependable reads."
-            : lightingStatus.lowLight
-              ? "Software brightening is helping the detector."
-              : "Scene brightness is healthy for tracking."}
-        </p>
       </div>
 
       <div className={metricCardClass(trackerSettings.predictionMode === "off" ? "zinc" : "amber")}>
@@ -5680,10 +5329,6 @@ export default function AnalysisEngine({
   const longRangeProcessingRef = useRef<LongRangeProcessingState>(
     createLongRangeProcessingState()
   );
-  const lowLightProcessingRef = useRef<LowLightProcessingState>(
-    createLowLightProcessingState()
-  );
-  const cameraTrackRef = useRef<MediaStreamTrack | null>(null);
   const strokeRangeRef = useRef<StrokeRange>({ minX: 1, maxX: 0, minY: 1, maxY: 0 });
   const landmarkMemoryRef = useRef<LandmarkTrackingMemory>(createLandmarkTrackingMemory());
   const motionHistoryRef = useRef<MotionHistory>(createMotionHistory());
@@ -5729,9 +5374,6 @@ export default function AnalysisEngine({
     DEFAULT_SWIMMER_PROFILE
   );
   const [interfaceStyle, setInterfaceStyle] = useState<InterfaceStyle>("pro");
-  const [lightingStatus, setLightingStatus] = useState<LightingStatus>(
-    createLightingStatus()
-  );
   const [cameraReady, setCameraReady] = useState(false);
   const [videoStreamReady, setVideoStreamReady] = useState(false);
   const [isLoaded, setIsLoaded] = useState(false);
@@ -5757,8 +5399,6 @@ export default function AnalysisEngine({
     poseInputTransformRef.current = FULL_POSE_INPUT_TRANSFORM;
     if (resetLongRangeScan) {
       longRangeProcessingRef.current = createLongRangeProcessingState();
-      lowLightProcessingRef.current = createLowLightProcessingState();
-      setLightingStatus(createLightingStatus());
     }
     strokeRangeRef.current = { minX: 1, maxX: 0, minY: 1, maxY: 0 };
     lastAnalysisRef.current = null;
@@ -5792,7 +5432,6 @@ export default function AnalysisEngine({
         setCameraReady(false);
         setVideoStreamReady(false);
         setIsLoaded(false);
-        cameraTrackRef.current = null;
         setCameraFallbackIndex(0);
         setCameraRetryKey((key) => key + 1);
       }
@@ -5836,7 +5475,6 @@ export default function AnalysisEngine({
     setCameraReady(false);
     setVideoStreamReady(false);
     setIsLoaded(false);
-    cameraTrackRef.current = null;
     setCameraFallbackIndex(0);
     setCameraRetryKey((key) => key + 1);
   }, []);
@@ -5859,8 +5497,6 @@ export default function AnalysisEngine({
     const settings = trackerSettingsRef.current;
     const swimmerProfile = swimmerProfileRef.current;
     const video = webcamRef.current?.video ?? undefined;
-    const videoWidth = video?.videoWidth || VIDEO_WIDTH;
-    const videoHeight = video?.videoHeight || VIDEO_HEIGHT;
     const overlayMetrics = prepareOverlayCanvas(
       canvas,
       ctx,
@@ -5923,8 +5559,6 @@ export default function AnalysisEngine({
             "predicting",
             missingFramesRef.current,
             fpsRef.current,
-            videoWidth,
-            videoHeight,
             swimmerProfile
           ),
         };
@@ -6001,8 +5635,6 @@ export default function AnalysisEngine({
       "live",
       0,
       fpsRef.current,
-      videoWidth,
-      videoHeight,
       swimmerProfile
     );
 
@@ -6095,8 +5727,6 @@ export default function AnalysisEngine({
         tracking.state,
         tracking.predictionFrames,
         tracking.fps,
-        videoWidth,
-        videoHeight,
         swimmerProfile
       ),
       trails: createMotionTrails(motionHistoryRef.current),
@@ -6163,41 +5793,6 @@ export default function AnalysisEngine({
             videoEl.videoWidth > 0 &&
             videoEl.videoHeight > 0;
 
-          if (videoReady) {
-            const lowLight = lowLightProcessingRef.current;
-            const lightingChanged = updateLowLightProcessing(
-              videoEl,
-              lowLight,
-              performance.now()
-            );
-
-            if (lightingChanged) {
-              setLightingStatus({
-                lowLight: lowLight.lowLight,
-                severe: lowLight.severe,
-                luminance: lowLight.luminance,
-                enhancement: lowLight.enhancement,
-                cameraBoosted: lowLight.cameraBoosted,
-              });
-            }
-
-            if (lowLight.lowLight) {
-              void applyBestEffortLowLightCameraBoost(cameraTrackRef.current, lowLight).then(
-                () => {
-                  if (!cancelled && lowLight.cameraBoosted) {
-                    setLightingStatus({
-                      lowLight: lowLight.lowLight,
-                      severe: lowLight.severe,
-                      luminance: lowLight.luminance,
-                      enhancement: lowLight.enhancement,
-                      cameraBoosted: lowLight.cameraBoosted,
-                    });
-                  }
-                }
-              );
-            }
-          }
-
           if (videoReady && !sendingFrame) {
             sendingFrame = true;
             poseScanFrameRef.current += 1;
@@ -6217,8 +5812,7 @@ export default function AnalysisEngine({
                 const poseFrame = renderLongRangePoseInput(
                   videoEl,
                   longRangeProcessingRef.current,
-                  transform,
-                  lowLightProcessingRef.current
+                  transform
                 );
 
                 await poseInstance.send({ image: poseFrame.image });
@@ -6277,9 +5871,6 @@ export default function AnalysisEngine({
       activeArmMemoryRef.current = createActiveArmMemory();
       poseInputTransformRef.current = FULL_POSE_INPUT_TRANSFORM;
       longRangeProcessingRef.current = createLongRangeProcessingState();
-      lowLightProcessingRef.current = createLowLightProcessingState();
-      cameraTrackRef.current = null;
-      setLightingStatus(createLightingStatus());
       strokeRangeRef.current = { minX: 1, maxX: 0, minY: 1, maxY: 0 };
       lastAnalysisRef.current = null;
       lastStateUpdateRef.current = 0;
@@ -6326,8 +5917,7 @@ export default function AnalysisEngine({
               trackerSettings.cameraFacingMode,
               cameraFallbackMode
             )}
-            onUserMedia={(stream) => {
-              cameraTrackRef.current = stream.getVideoTracks()[0] ?? null;
+            onUserMedia={() => {
               setCameraError(null);
               setVideoStreamReady(true);
             }}
@@ -6335,7 +5925,6 @@ export default function AnalysisEngine({
               setVideoStreamReady(false);
               setCameraReady(false);
               setIsLoaded(false);
-              cameraTrackRef.current = null;
 
               if (
                 isRecoverableCameraStartupError(error) &&
@@ -6356,7 +5945,7 @@ export default function AnalysisEngine({
           className="absolute inset-0 w-full h-full pointer-events-none z-[100]"
           aria-hidden
         />
-        <div className="pointer-events-none absolute left-4 top-4 z-[105] flex flex-wrap gap-2">
+        <div className="pointer-events-none absolute left-4 top-4 z-[105] flex flex-wrap gap-2">9*
           <span className="rounded-md border border-zinc-700/80 bg-black/60 px-2.5 py-1 text-xs font-medium text-zinc-200 backdrop-blur-md">
             {cameraViewBadgeLabel(
               trackerSettings.viewMode,
@@ -6386,17 +5975,6 @@ export default function AnalysisEngine({
           >
             EVF {analysisState?.evf.left.isEVF || analysisState?.evf.right.isEVF ? "Active" : "Scan"}
           </span>
-          {lightingStatus.lowLight && (
-            <span
-              className={`rounded-md border px-2.5 py-1 text-xs font-medium backdrop-blur-md ${
-                lightingStatus.severe
-                  ? "border-red-500/70 bg-red-950/70 text-red-100"
-                  : "border-amber-500/70 bg-amber-950/70 text-amber-100"
-              }`}
-            >
-              {lightingStatus.severe ? "Very dark" : "Low light boost"}
-            </span>
-          )}
         </div>
 
         {trackerSettings.showCoachCues && !cameraError && coachCue && (
@@ -6457,7 +6035,6 @@ export default function AnalysisEngine({
         onStrokeFocusChange={handleStrokeFocusChange}
         swimmerProfile={swimmerProfile}
         onSwimmerProfileChange={handleSwimmerProfileChange}
-        lightingStatus={lightingStatus}
         interfaceStyle={interfaceStyle}
         onInterfaceStyleChange={setInterfaceStyle}
         onSessionComplete={onSessionComplete}
