@@ -1,13 +1,13 @@
-This is your **GlideAI Master Manifest**. It combines the technical architecture, the biomechanical math, and the "Vibe Coding" setup instructions into one clean, copyable file. 
+This is your **GlideAI Master Manifest**. It combines the technical architecture, the biomechanical math, and the "Vibe Coding" setup instructions into one clean, copyable file.
 
 You can save this as `GLIDE_AI_MANIFEST.md` in your project root to keep Cursor aligned, or use it as your `README.md`.
 
 ---
 
 # GlideAI: Institutional Aquatic Intelligence 🏊‍♂️
-**Version:** 1.0.0-Beta  
-**Focus:** 2026 Privacy-Compliant Markerless Motion Capture  
-**Objective:** $20,000 Revenue Target (Summer 2026)  
+**Version:** 1.0.0-Beta
+**Focus:** 2026 Privacy-Compliant Markerless Motion Capture
+**Objective:** $20,000 Revenue Target (Summer 2026)
 
 ---
 
@@ -64,13 +64,13 @@ npm install @mediapipe/pose @mediapipe/camera_utils react-webcam lucide-react
 ## 5. The Master Composer Prompt
 **Copy and paste this into Cursor Composer (`Cmd + I`) once your dependencies are installed:**
 
-> "Generate the core `PoseAnalyzer.tsx` component for GlideAI. 
+> "Generate the core `PoseAnalyzer.tsx` component for GlideAI.
 > 1. Use `react-webcam` to mirror the user's feed.
-> 2. Initialize `@mediapipe/pose` using the WASM runtime from JSDelivr. 
-> 3. Draw a skeletal overlay on a high-z-index `<canvas>`. 
-> 4. Implement a `checkEVF()` function using the Landmark coordinates for Shoulder, Elbow, and Wrist. 
-> 5. If the elbow angle is optimized for an Early Vertical Forearm ($110^\circ$), color the forearm segments in neon green (#39FF14). 
-> 6. Add a sidebar metrics panel showing 'Real-time Elbow Angle' and a 'Privacy Lock' icon to indicate 100% local processing. 
+> 2. Initialize `@mediapipe/pose` using the WASM runtime from JSDelivr.
+> 3. Draw a skeletal overlay on a high-z-index `<canvas>`.
+> 4. Implement a `checkEVF()` function using the Landmark coordinates for Shoulder, Elbow, and Wrist.
+> 5. If the elbow angle is optimized for an Early Vertical Forearm ($110^\circ$), color the forearm segments in neon green (#39FF14).
+> 6. Add a sidebar metrics panel showing 'Real-time Elbow Angle' and a 'Privacy Lock' icon to indicate 100% local processing.
 > 7. Apply a dark, sporty Tailwind UI."
 
 ---
